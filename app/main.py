@@ -90,6 +90,14 @@ def _role_sort_key(role: str | None) -> int:
     return _ROLE_ORDER.index(matched_key)
 
 
+_WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def _format_date_jp(date_str: str) -> str:
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    return f"{d.month}月{d.day}日({_WEEKDAY_JP[d.weekday()]})"
+
+
 _LABEL_TODAY_LIST = "今日出勤リスト"
 _LABEL_AM_I_WORKING_TODAY = "今日の自分は出勤？"
 _LABEL_TOMORROW_LIST = "明日出勤リスト"
@@ -137,7 +145,7 @@ def _format_shift_line(shift: dict) -> str:
     start = shift.get("start")
     end = shift.get("end")
     role = shift.get("role")
-    line = f"・{shift['date']}"
+    line = f"・{_format_date_jp(shift['date'])}"
     if start and end:
         line += f" {start}〜{end}"
     if role:
@@ -146,7 +154,7 @@ def _format_shift_line(shift: dict) -> str:
 
 
 def _format_shift_details(shift: dict) -> str:
-    """出勤・退勤時刻と役割(正式名称)を「(07:30〜19:00、役割:...)」の形式で返す。該当情報がなければ空文字。"""
+    """出勤・退勤時刻と役割(正式名称)を「(07:30〜19:00 役割:...)」の形式で返す。該当情報がなければ空文字。"""
     start = shift.get("start")
     end = shift.get("end")
     role = shift.get("role")
@@ -158,7 +166,7 @@ def _format_shift_details(shift: dict) -> str:
         if shift.get("add_meiten"):
             full_role = f"銘店・{full_role}"
         details.append(f"役割:{full_role}")
-    return f"({'、'.join(details)})" if details else ""
+    return f"({' '.join(details)})" if details else ""
 
 
 def _find_shift_for_date(shifts: list[dict], date_str: str) -> dict | None:
@@ -173,9 +181,10 @@ def _build_worker_list_message(date_str: str, roster: dict) -> str:
             rows.append((name, match))
     rows.sort(key=lambda r: _role_sort_key(r[1].get("role")))
     lines = [f"・{name}さん {_format_shift_details(match)}".rstrip() for name, match in rows]
+    date_label = _format_date_jp(date_str)
     if lines:
-        return f"{date_str}の出勤予定:\n" + "\n".join(lines)
-    return f"{date_str}は出勤予定の人はいません。"
+        return f"{date_label}の出勤予定:\n" + "\n".join(lines)
+    return f"{date_label}は出勤予定の人はいません。"
 
 
 def _time_str_to_minutes(time_str: str | None) -> int | None:
@@ -234,14 +243,15 @@ def handle_text(event: MessageEvent) -> None:
 
     if text == _LABEL_AM_I_WORKING_TODAY:
         today = datetime.now(_JST).strftime("%Y-%m-%d")
+        today_label = _format_date_jp(today)
         record = storage.get_user(user_id) or {}
         match = _find_shift_for_date(record.get("shifts") or [], today)
         if match:
-            message = f"はい、今日({today})は出勤日です {_format_shift_details(match)}".rstrip()
+            message = f"今日({today_label})は出勤日です {_format_shift_details(match)}".rstrip()
         elif today in (record.get("off_dates") or []):
-            message = f"今日({today})は休みです。"
+            message = f"今日({today_label})は休みです。"
         else:
-            message = f"今日({today})の予定が登録されていません。"
+            message = f"今日({today_label})の予定が登録されていません。"
         _reply(event.reply_token, message)
         return
 
@@ -253,14 +263,15 @@ def handle_text(event: MessageEvent) -> None:
 
     if text == _LABEL_AM_I_WORKING:
         tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+        tomorrow_label = _format_date_jp(tomorrow)
         record = storage.get_user(user_id) or {}
         match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
         if match:
-            message = f"はい、明日({tomorrow})は出勤日です {_format_shift_details(match)}".rstrip()
+            message = f"明日({tomorrow_label})は出勤日です {_format_shift_details(match)}".rstrip()
         elif tomorrow in (record.get("off_dates") or []):
-            message = f"明日({tomorrow})は休みです。"
+            message = f"明日({tomorrow_label})は休みです。"
         else:
-            message = f"明日({tomorrow})の予定が登録されていません。"
+            message = f"明日({tomorrow_label})の予定が登録されていません。"
         _reply(event.reply_token, message)
         return
 
@@ -360,16 +371,17 @@ async def send_reminders(request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow_label = _format_date_jp(tomorrow)
     sent = []
     for user_id, record in storage.all_users().items():
         name = record.get("name", "")
         match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
         if match:
             detail_part = _format_shift_details(match)
-            _push(user_id, f"【リマインド】明日 {tomorrow} は出勤日です{detail_part}。{name}さん、忘れずに!")
+            _push(user_id, f"【リマインド】明日 {tomorrow_label} は出勤日です{detail_part}。{name}さん 忘れずに!")
             sent.append(user_id)
         elif tomorrow in (record.get("off_dates") or []):
-            _push(user_id, f"【リマインド】明日 {tomorrow} は休みです。{name}さん、ゆっくり休んでください。")
+            _push(user_id, f"【リマインド】明日 {tomorrow_label} は休みです。{name}さん ゆっくり休んでください。")
             sent.append(user_id)
 
     return {"date_checked": tomorrow, "reminders_sent": len(sent)}
