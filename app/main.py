@@ -157,7 +157,7 @@ def _build_worker_list_message(date_str: str, users: dict) -> str:
             lines.append(f"・{name}さん {_format_shift_details(match)}".rstrip())
     if lines:
         return f"{date_str}の出勤予定:\n" + "\n".join(lines)
-    return f"{date_str}の出勤予定は登録されていません。"
+    return f"{date_str}は出勤予定の人はいません。"
 
 
 def _time_str_to_minutes(time_str: str | None) -> int | None:
