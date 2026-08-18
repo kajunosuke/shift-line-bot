@@ -40,11 +40,21 @@ def set_name(user_id: str, name: str) -> None:
         _write_all(data)
 
 
-def set_shifts(user_id: str, shift_dates: list[str]) -> None:
+def set_shifts(user_id: str, shifts: list[dict], off_dates: list[str]) -> None:
     with _LOCK:
         data = _read_all()
         record = data.get(user_id, {})
-        record["shifts"] = sorted(set(shift_dates))
+        record["shifts"] = sorted(shifts, key=lambda s: s["date"])
+        record["off_dates"] = sorted(set(off_dates))
+        data[user_id] = record
+        _write_all(data)
+
+
+def mark_shift_start_alert_sent(user_id: str, date_str: str) -> None:
+    with _LOCK:
+        data = _read_all()
+        record = data.get(user_id, {})
+        record["last_shift_start_alert_date"] = date_str
         data[user_id] = record
         _write_all(data)
 

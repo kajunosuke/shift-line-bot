@@ -10,9 +10,12 @@ from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
+    MessageAction,
     MessagingApi,
     MessagingApiBlob,
     PushMessageRequest,
+    QuickReply,
+    QuickReplyItem,
     ReplyMessageRequest,
     TextMessage as LineTextMessage,
 )
@@ -41,13 +44,59 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 app = FastAPI()
 
+_ROLE_NAMES = {
+    "和": "水物",
+    "牛": "牛乳",
+    "パ": "パン",
+    "洋": "洋菓子・ヨーグルト",
+    "ス": "スキャンチェック",
+    "銘": "銘店",
+    "中": "中番",
+    "遅": "遅番",
+    "研修": "研修",
+    "飲": "飲料",
+}
 
-def _reply(reply_token: str, text: str) -> None:
+
+_ROLE_KEYS_BY_LENGTH = sorted(_ROLE_NAMES, key=len, reverse=True)
+
+
+def _full_role_name(code: str) -> str:
+    if code in _ROLE_NAMES:
+        return _ROLE_NAMES[code]
+    parts = []
+    remaining = code
+    while remaining:
+        matched_key = next((k for k in _ROLE_KEYS_BY_LENGTH if remaining.startswith(k)), None)
+        if matched_key is None:
+            return code
+        parts.append(_ROLE_NAMES[matched_key])
+        remaining = remaining[len(matched_key):]
+    if not parts:
+        return code
+    return "と".join(parts)
+
+
+_LABEL_TOMORROW_LIST = "明日出勤リスト"
+_LABEL_AM_I_WORKING = "明日の自分は出勤？"
+
+
+def _default_quick_reply() -> QuickReply:
+    return QuickReply(
+        items=[
+            QuickReplyItem(action=MessageAction(label=_LABEL_TOMORROW_LIST, text=_LABEL_TOMORROW_LIST)),
+            QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING, text=_LABEL_AM_I_WORKING)),
+        ]
+    )
+
+
+def _reply(reply_token: str, text: str, with_quick_reply: bool = True) -> None:
+    quick_reply = _default_quick_reply() if with_quick_reply else None
     with ApiClient(_config) as api_client:
         MessagingApi(api_client).reply_message(
             ReplyMessageRequest(
                 reply_token=reply_token,
-                messages=[LineTextMessage(text=text)],
+                messages=[LineTextMessage(text=text, quick_reply=quick_reply)],
             )
         )
 
@@ -67,11 +116,66 @@ def _get_message_content(message_id: str) -> bytes:
         return MessagingApiBlob(api_client).get_message_content(message_id)
 
 
-def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
-    shift_dates = sorted(set(result.get("shift_dates") or []))
-    storage.set_shifts(user_id, shift_dates)
+def _format_shift_line(shift: dict) -> str:
+    start = shift.get("start")
+    end = shift.get("end")
+    role = shift.get("role")
+    line = f"・{shift['date']}"
+    if start and end:
+        line += f" {start}〜{end}"
+    if role:
+        line += f"(役割:{role})"
+    return line
 
-    if not shift_dates:
+
+def _format_shift_details(shift: dict) -> str:
+    """出勤・退勤時刻と役割(正式名称)を「(07:30〜19:00、役割:...)」の形式で返す。該当情報がなければ空文字。"""
+    start = shift.get("start")
+    end = shift.get("end")
+    role = shift.get("role")
+    details = []
+    if start and end:
+        details.append(f"{start}〜{end}")
+    if role:
+        full_role = _full_role_name(role)
+        if shift.get("add_meiten"):
+            full_role = f"銘店・{full_role}"
+        details.append(f"役割:{full_role}")
+    return f"({'、'.join(details)})" if details else ""
+
+
+def _find_shift_for_date(shifts: list[dict], date_str: str) -> dict | None:
+    return next((s for s in shifts if s.get("date") == date_str), None)
+
+
+def _build_worker_list_message(date_str: str, users: dict) -> str:
+    lines = []
+    for record in users.values():
+        match = _find_shift_for_date(record.get("shifts") or [], date_str)
+        if match:
+            name = record.get("name", "")
+            lines.append(f"・{name}さん {_format_shift_details(match)}".rstrip())
+    if lines:
+        return f"{date_str}の出勤予定:\n" + "\n".join(lines)
+    return f"{date_str}の出勤予定は登録されていません。"
+
+
+def _time_str_to_minutes(time_str: str | None) -> int | None:
+    if not time_str:
+        return None
+    try:
+        h, m = time_str.split(":")
+        return int(h) * 60 + int(m)
+    except ValueError:
+        return None
+
+
+def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
+    shifts = result.get("shifts") or []
+    off_dates = result.get("off_dates") or []
+    storage.set_shifts(user_id, shifts, off_dates)
+
+    if not shifts:
         note = result.get("note") or ""
         message = f"「{name}」さんの出勤日が見つかりませんでした。"
         if note:
@@ -79,7 +183,7 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
         _reply(event.reply_token, message)
         return
 
-    lines = "\n".join(f"・{d}" for d in shift_dates)
+    lines = "\n".join(_format_shift_line(s) for s in shifts)
     note = result.get("note") or ""
     message = f"「{name}」さんの出勤日を登録しました:\n{lines}"
     if note:
@@ -103,6 +207,25 @@ def handle_follow(event: FollowEvent) -> None:
 def handle_text(event: MessageEvent) -> None:
     user_id = event.source.user_id
     text = event.message.text.strip()
+
+    if text == _LABEL_TOMORROW_LIST:
+        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+        message = _build_worker_list_message(tomorrow, storage.all_users())
+        _reply(event.reply_token, message)
+        return
+
+    if text == _LABEL_AM_I_WORKING:
+        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+        record = storage.get_user(user_id) or {}
+        match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
+        if match:
+            message = f"はい、明日({tomorrow})は出勤日です {_format_shift_details(match)}".rstrip()
+        elif tomorrow in (record.get("off_dates") or []):
+            message = f"明日({tomorrow})は休みです。"
+        else:
+            message = f"明日({tomorrow})の予定が登録されていません。"
+        _reply(event.reply_token, message)
+        return
 
     if text.startswith("名前変更"):
         new_name = text.replace("名前変更", "", 1).strip()
@@ -194,13 +317,52 @@ async def send_reminders(request: Request):
     tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
     sent = []
     for user_id, record in storage.all_users().items():
-        shifts = record.get("shifts") or []
-        if tomorrow in shifts:
-            name = record.get("name", "")
-            _push(user_id, f"【リマインド】明日 {tomorrow} は出勤日です。{name}さん、忘れずに!")
+        name = record.get("name", "")
+        match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
+        if match:
+            detail_part = _format_shift_details(match)
+            _push(user_id, f"【リマインド】明日 {tomorrow} は出勤日です{detail_part}。{name}さん、忘れずに!")
+            sent.append(user_id)
+        elif tomorrow in (record.get("off_dates") or []):
+            _push(user_id, f"【リマインド】明日 {tomorrow} は休みです。{name}さん、ゆっくり休んでください。")
             sent.append(user_id)
 
     return {"date_checked": tomorrow, "reminders_sent": len(sent)}
+
+
+@app.post("/internal/send-shift-start-alerts")
+async def send_shift_start_alerts(request: Request):
+    token = request.query_params.get("token")
+    if token != REMINDER_TRIGGER_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    now = datetime.now(_JST)
+    today = now.strftime("%Y-%m-%d")
+    now_minutes = now.hour * 60 + now.minute
+
+    users = storage.all_users()
+    message = None
+    sent = []
+
+    for user_id, record in users.items():
+        if record.get("last_shift_start_alert_date") == today:
+            continue
+        match = _find_shift_for_date(record.get("shifts") or [], today)
+        if not match:
+            continue
+        start_minutes = _time_str_to_minutes(match.get("start"))
+        if start_minutes is None:
+            continue
+        if now_minutes < start_minutes - 10:
+            continue
+
+        if message is None:
+            message = _build_worker_list_message(today, users)
+        _push(user_id, f"まもなく出勤時刻です。\n{message}")
+        storage.mark_shift_start_alert_sent(user_id, today)
+        sent.append(user_id)
+
+    return {"date_checked": today, "alerts_sent": len(sent)}
 
 
 @app.get("/health")

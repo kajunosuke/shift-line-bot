@@ -8,11 +8,17 @@ import openpyxl
 
 _JST = ZoneInfo("Asia/Tokyo")
 
-_OFF_MARKERS = {"", "○", "休", "-", "ー", "off", "OFF", "×", "公休", "希望休", "有給", "欠勤"}
+_OFF_MARKERS = {"", "○", "◎", "休", "-", "ー", "off", "OFF", "×", "公休", "希望休", "有給", "欠勤"}
 _YEAR_MONTH_RE = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
 _MAX_ROWS = 400
 _MAX_HEADER_SEARCH_ROWS = 50
 _MIN_STRING_CELLS = 3
+
+# 氏名が複数行(6行)にまたがる結合セルになっているブロック内で、
+# シフト記号の行(offset 0)から数えて出勤時刻・退勤時刻が入っている行のオフセット。
+# 対応表のテンプレート(月間オペレーション確認表)を実データで検証して確認した値。
+_START_TIME_ROW_OFFSET = 2
+_END_TIME_ROW_OFFSET = 3
 
 
 def _cell_text(value) -> str:
@@ -21,6 +27,21 @@ def _cell_text(value) -> str:
     if isinstance(value, (dt.datetime, dt.date)):
         return value.strftime("%Y-%m-%d")
     return str(value).strip()
+
+
+def _extract_time_hhmm(value) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, dt.datetime):
+        t = value.time()
+        return f"{t.hour:02d}:{t.minute:02d}"
+    if isinstance(value, dt.time):
+        return f"{value.hour:02d}:{value.minute:02d}"
+    if isinstance(value, (int, float)):
+        frac = float(value) % 1
+        total_minutes = round(frac * 24 * 60) % (24 * 60)
+        return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+    return None
 
 
 def _looks_numeric(text: str) -> bool:
@@ -113,11 +134,12 @@ def _find_day_header(ws, year_month_hint: tuple[int, int]) -> dict[dt.date, int]
     return None
 
 
-def _find_name_left_of(ws, row_idx: int, first_data_col: int) -> str | None:
+def _find_name_and_block(ws, row_idx: int, first_data_col: int):
     """データ列より左側から氏名を探す。結合セル(複数行にまたがる)のテキストを優先し、
-    社員番号のような数値だけのセルは氏名の候補から除外する。"""
-    merged_candidates: list[tuple[int, str]] = []
-    plain_candidates: list[tuple[int, str]] = []
+    社員番号のような数値だけのセルは氏名の候補から除外する。
+    見つかった場合は (氏名, ブロック開始行, ブロック終了行) を返す。"""
+    merged_candidates: list[tuple[int, str, int, int]] = []
+    plain_candidates: list[tuple[int, str, int, int]] = []
     seen_ranges = set()
 
     for col in range(first_data_col - 1, 0, -1):
@@ -133,26 +155,40 @@ def _find_name_left_of(ws, row_idx: int, first_data_col: int) -> str | None:
                 continue
             height = merged_range.max_row - merged_range.min_row + 1
             if height >= 2:
-                merged_candidates.append((col, text))
+                merged_candidates.append((col, text, merged_range.min_row, merged_range.max_row))
             else:
-                plain_candidates.append((col, text))
+                plain_candidates.append((col, text, row_idx, row_idx))
         else:
             text = _cell_text(ws.cell(row=row_idx, column=col).value)
             if text and not _looks_numeric(text):
-                plain_candidates.append((col, text))
+                plain_candidates.append((col, text, row_idx, row_idx))
 
     if merged_candidates:
         merged_candidates.sort(key=lambda c: -c[0])
-        return merged_candidates[0][1]
+        _, name, block_min, block_max = merged_candidates[0]
+        return name, block_min, block_max
     if plain_candidates:
         plain_candidates.sort(key=lambda c: -c[0])
-        return plain_candidates[0][1]
+        _, name, block_min, block_max = plain_candidates[0]
+        return name, block_min, block_max
     return None
+
+
+def _has_meiten_that_day(ws, col: int, max_row: int) -> bool:
+    """指定した日付の列に「銘」担当の人が(誰か1人でも)いるかどうかを調べる。"""
+    for row_idx in range(1, max_row + 1):
+        value = ws.cell(row=row_idx, column=col).value
+        if isinstance(value, str) and "銘" in value:
+            return True
+    return False
 
 
 def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str):
     """各行を調べ、日付列に文字(シフト記号)が並ぶ行だけを氏名の手がかりとして使う。
-    出退勤時刻のように数値(時刻シリアル値)しか入らない行は自然に除外される。"""
+    出退勤時刻のように数値(時刻シリアル値)しか入らない行は自然に除外される。
+    一致した行が氏名の結合セルブロック内にあれば、その2〜3行下にある出勤・退勤時刻も取得する。
+    出勤/休みの判定は出退勤時刻の有無を優先する(シフト記号が「○」等でも
+    実際の時刻が入っていれば出勤扱い。夕方出勤スタッフなど特定の役割を持たない場合に対応)。"""
     first_data_col = min(date_to_col.values())
     max_row = min(ws.max_row or 0, _MAX_ROWS)
 
@@ -165,18 +201,47 @@ def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str
         if string_cells < _MIN_STRING_CELLS:
             continue
 
-        name = _find_name_left_of(ws, row_idx, first_data_col)
-        if not name or not _names_match(name, user_name):
+        found = _find_name_and_block(ws, row_idx, first_data_col)
+        if not found:
+            continue
+        name, block_min, block_max = found
+        if not _names_match(name, user_name):
             continue
 
-        shift_dates = set()
-        for date_value, col in date_to_col.items():
-            text = _cell_text(ws.cell(row=row_idx, column=col).value)
-            if text and text not in _OFF_MARKERS:
-                shift_dates.add(date_value)
-        return name, shift_dates
+        start_row = row_idx + _START_TIME_ROW_OFFSET
+        end_row = row_idx + _END_TIME_ROW_OFFSET
 
-    return None, set()
+        entries = []
+        off_dates: set[dt.date] = set()
+        for date_value, col in date_to_col.items():
+            code_text = _cell_text(ws.cell(row=row_idx, column=col).value)
+            start = _extract_time_hhmm(ws.cell(row=start_row, column=col).value) if start_row <= block_max else None
+            end = _extract_time_hhmm(ws.cell(row=end_row, column=col).value) if end_row <= block_max else None
+
+            if not (start and end):
+                # 出退勤時刻が入っていない日は、シフト記号が明示的な休み記号のときだけ「休み確定」とする
+                if code_text and code_text in _OFF_MARKERS:
+                    off_dates.add(date_value)
+                continue
+
+            # 出退勤時刻が入っている=出勤日。シフト記号が「○」「◎」等の場合は
+            # 夕方出勤スタッフなどで特定の役割を持たないケースなので、役割は「遅」(遅番)扱いにする。
+            role = code_text if code_text and code_text not in _OFF_MARKERS else "遅"
+            add_meiten = "洋" in role and not _has_meiten_that_day(ws, col, max_row)
+            entries.append(
+                {
+                    "date": date_value.isoformat(),
+                    "start": start,
+                    "end": end,
+                    "role": role,
+                    "add_meiten": add_meiten,
+                }
+            )
+
+        entries.sort(key=lambda e: e["date"])
+        return name, entries, sorted(d.isoformat() for d in off_dates)
+
+    return None, [], []
 
 
 def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
@@ -191,14 +256,13 @@ def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
             continue
         any_header_found = True
 
-        matched_name, shift_dates = _extract_shifts_for_name(ws, date_to_col, user_name)
+        matched_name, shifts, off_dates = _extract_shifts_for_name(ws, date_to_col, user_name)
         if matched_name:
-            dates = sorted(d.isoformat() for d in shift_dates)
-            return {"shift_dates": dates, "matched_name_in_table": matched_name, "note": ""}
+            return {"shifts": shifts, "off_dates": off_dates, "matched_name_in_table": matched_name, "note": ""}
 
     if any_header_found:
         note = "日付が並んだ表は見つかりましたが、登録名と一致する行が見つかりませんでした。登録名がシフト表内の表記と一致しているか確認してください。"
     else:
         note = "対応している表の形式(日付が横に並んだヘッダー行を含む月間シフト表)が見つかりませんでした。"
 
-    return {"shift_dates": [], "matched_name_in_table": None, "note": note}
+    return {"shifts": [], "off_dates": [], "matched_name_in_table": None, "note": note}
