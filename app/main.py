@@ -26,6 +26,7 @@ from linebot.v3.webhooks import (
 
 from app import storage
 from app.excel_extract import extract_shift_dates_from_excel
+from app.pdf_extract import extract_shift_dates_from_pdf
 from app.vision import extract_shift_dates
 
 logging.basicConfig(level=logging.INFO)
@@ -169,22 +170,30 @@ def handle_file(event: MessageEvent) -> None:
         return
 
     file_name = (event.message.file_name or "").lower()
-    if not file_name.endswith((".xlsx", ".xlsm")):
+    name = record["name"]
+
+    if file_name.endswith((".xlsx", ".xlsm")):
+        file_bytes = _get_message_content(event.message.id)
+        try:
+            result = extract_shift_dates_from_excel(file_bytes, name)
+        except Exception:
+            logger.exception("excel shift extraction failed")
+            _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
+            return
+    elif file_name.endswith(".pdf"):
+        file_bytes = _get_message_content(event.message.id)
+        try:
+            result = extract_shift_dates_from_pdf(file_bytes, name)
+        except Exception:
+            logger.exception("pdf shift extraction failed")
+            _reply(event.reply_token, "PDFファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
+            return
+    else:
         _reply(
             event.reply_token,
-            "対応しているファイル形式は Excel (.xlsx / .xlsm) のみです。\n"
+            "対応しているファイル形式は Excel (.xlsx / .xlsm) と PDF (.pdf) です。\n"
             "古い形式(.xls)の場合はExcelやスプレッドシートで開いて「.xlsx」形式で保存し直してから送ってください。",
         )
-        return
-
-    name = record["name"]
-    file_bytes = _get_message_content(event.message.id)
-
-    try:
-        result = extract_shift_dates_from_excel(file_bytes, name)
-    except Exception:
-        logger.exception("excel shift extraction failed")
-        _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
         return
 
     _apply_extraction_result(event, name, user_id, result)
