@@ -180,7 +180,7 @@ def _build_worker_list_message(date_str: str, roster: dict) -> str:
         if match:
             rows.append((name, match))
     rows.sort(key=lambda r: _role_sort_key(r[1].get("role")))
-    lines = [f"・{name}さん {_format_shift_details(match)}".rstrip() for name, match in rows]
+    lines = [f"・{name}さん {_format_shift_details(match).strip('()')}".rstrip() for name, match in rows]
     date_label = _format_date_jp(date_str)
     if lines:
         return f"{date_label}の出勤予定:\n" + "\n".join(lines)
@@ -243,15 +243,15 @@ def handle_text(event: MessageEvent) -> None:
 
     if text == _LABEL_AM_I_WORKING_TODAY:
         today = datetime.now(_JST).strftime("%Y-%m-%d")
-        today_label = _format_date_jp(today)
         record = storage.get_user(user_id) or {}
         match = _find_shift_for_date(record.get("shifts") or [], today)
         if match:
-            message = f"今日({today_label})は出勤日です {_format_shift_details(match)}".rstrip()
+            detail = _format_shift_details(match).strip("()")
+            message = f"今日は出勤日です\n{detail}" if detail else "今日は出勤日です"
         elif today in (record.get("off_dates") or []):
-            message = f"今日({today_label})は休みです。"
+            message = "今日は休みです。"
         else:
-            message = f"今日({today_label})の予定が登録されていません。"
+            message = "今日の予定が登録されていません。"
         _reply(event.reply_token, message)
         return
 
@@ -267,7 +267,8 @@ def handle_text(event: MessageEvent) -> None:
         record = storage.get_user(user_id) or {}
         match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
         if match:
-            message = f"明日({tomorrow_label})は出勤日です {_format_shift_details(match)}".rstrip()
+            detail = _format_shift_details(match).strip("()")
+            message = f"明日({tomorrow_label})は出勤日です\n{detail}" if detail else f"明日({tomorrow_label})は出勤日です"
         elif tomorrow in (record.get("off_dates") or []):
             message = f"明日({tomorrow_label})は休みです。"
         else:
