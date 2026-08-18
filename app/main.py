@@ -77,6 +77,8 @@ def _full_role_name(code: str) -> str:
     return "と".join(parts)
 
 
+_LABEL_TODAY_LIST = "今日出勤リスト"
+_LABEL_AM_I_WORKING_TODAY = "今日の自分は出勤？"
 _LABEL_TOMORROW_LIST = "明日出勤リスト"
 _LABEL_AM_I_WORKING = "明日の自分は出勤？"
 
@@ -84,6 +86,8 @@ _LABEL_AM_I_WORKING = "明日の自分は出勤？"
 def _default_quick_reply() -> QuickReply:
     return QuickReply(
         items=[
+            QuickReplyItem(action=MessageAction(label=_LABEL_TODAY_LIST, text=_LABEL_TODAY_LIST)),
+            QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING_TODAY, text=_LABEL_AM_I_WORKING_TODAY)),
             QuickReplyItem(action=MessageAction(label=_LABEL_TOMORROW_LIST, text=_LABEL_TOMORROW_LIST)),
             QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING, text=_LABEL_AM_I_WORKING)),
         ]
@@ -207,6 +211,25 @@ def handle_follow(event: FollowEvent) -> None:
 def handle_text(event: MessageEvent) -> None:
     user_id = event.source.user_id
     text = event.message.text.strip()
+
+    if text == _LABEL_TODAY_LIST:
+        today = datetime.now(_JST).strftime("%Y-%m-%d")
+        message = _build_worker_list_message(today, storage.all_users())
+        _reply(event.reply_token, message)
+        return
+
+    if text == _LABEL_AM_I_WORKING_TODAY:
+        today = datetime.now(_JST).strftime("%Y-%m-%d")
+        record = storage.get_user(user_id) or {}
+        match = _find_shift_for_date(record.get("shifts") or [], today)
+        if match:
+            message = f"はい、今日({today})は出勤日です {_format_shift_details(match)}".rstrip()
+        elif today in (record.get("off_dates") or []):
+            message = f"今日({today})は休みです。"
+        else:
+            message = f"今日({today})の予定が登録されていません。"
+        _reply(event.reply_token, message)
+        return
 
     if text == _LABEL_TOMORROW_LIST:
         tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
