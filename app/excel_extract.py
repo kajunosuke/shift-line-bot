@@ -213,10 +213,24 @@ def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str
 
         entries = []
         off_dates: set[dt.date] = set()
+        debug_logged = False
         for date_value, col in date_to_col.items():
             code_text = _cell_text(ws.cell(row=row_idx, column=col).value)
-            start = _extract_time_hhmm(ws.cell(row=start_row, column=col).value) if start_row <= block_max else None
-            end = _extract_time_hhmm(ws.cell(row=end_row, column=col).value) if end_row <= block_max else None
+            start_raw = ws.cell(row=start_row, column=col).value if start_row <= block_max else "ROW>BLOCK_MAX"
+            end_raw = ws.cell(row=end_row, column=col).value if end_row <= block_max else "ROW>BLOCK_MAX"
+            start = _extract_time_hhmm(start_raw) if start_row <= block_max else None
+            end = _extract_time_hhmm(end_raw) if end_row <= block_max else None
+
+            if not debug_logged and code_text and code_text not in _OFF_MARKERS:
+                import logging
+
+                logging.getLogger("shiftbot").info(
+                    "debug row_idx=%s block=(%s,%s) start_row=%s end_row=%s date=%s code=%r "
+                    "start_raw=%r(%s) end_raw=%r(%s) start=%r end=%r",
+                    row_idx, block_min, block_max, start_row, end_row, date_value, code_text,
+                    start_raw, type(start_raw).__name__, end_raw, type(end_raw).__name__, start, end,
+                )
+                debug_logged = True
 
             if not (start and end):
                 # 出退勤時刻が入っていない日は、シフト記号が明示的な休み記号のときだけ「休み確定」とする
