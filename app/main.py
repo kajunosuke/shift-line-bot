@@ -263,16 +263,15 @@ def handle_text(event: MessageEvent) -> None:
 
     if text == _LABEL_AM_I_WORKING:
         tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
-        tomorrow_label = _format_date_jp(tomorrow)
         record = storage.get_user(user_id) or {}
         match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
         if match:
             detail = _format_shift_details(match).strip("()")
-            message = f"明日({tomorrow_label})は出勤日です\n{detail}" if detail else f"明日({tomorrow_label})は出勤日です"
+            message = f"明日は出勤日です\n{detail}" if detail else "明日は出勤日です"
         elif tomorrow in (record.get("off_dates") or []):
-            message = f"明日({tomorrow_label})は休みです。"
+            message = "明日は休みです。"
         else:
-            message = f"明日({tomorrow_label})の予定が登録されていません。"
+            message = "明日の予定が登録されていません。"
         _reply(event.reply_token, message)
         return
 
