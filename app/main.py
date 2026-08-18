@@ -28,7 +28,7 @@ from linebot.v3.webhooks import (
 )
 
 from app import storage
-from app.excel_extract import extract_shift_dates_from_excel
+from app.excel_extract import extract_all_shifts_from_excel, extract_shift_dates_from_excel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shiftbot")
@@ -152,12 +152,11 @@ def _find_shift_for_date(shifts: list[dict], date_str: str) -> dict | None:
     return next((s for s in shifts if s.get("date") == date_str), None)
 
 
-def _build_worker_list_message(date_str: str, users: dict) -> str:
+def _build_worker_list_message(date_str: str, roster: dict) -> str:
     lines = []
-    for record in users.values():
+    for name, record in roster.items():
         match = _find_shift_for_date(record.get("shifts") or [], date_str)
         if match:
-            name = record.get("name", "")
             lines.append(f"・{name}さん {_format_shift_details(match)}".rstrip())
     if lines:
         return f"{date_str}の出勤予定:\n" + "\n".join(lines)
@@ -214,7 +213,7 @@ def handle_text(event: MessageEvent) -> None:
 
     if text == _LABEL_TODAY_LIST:
         today = datetime.now(_JST).strftime("%Y-%m-%d")
-        message = _build_worker_list_message(today, storage.all_users())
+        message = _build_worker_list_message(today, storage.get_roster())
         _reply(event.reply_token, message)
         return
 
@@ -233,7 +232,7 @@ def handle_text(event: MessageEvent) -> None:
 
     if text == _LABEL_TOMORROW_LIST:
         tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
-        message = _build_worker_list_message(tomorrow, storage.all_users())
+        message = _build_worker_list_message(tomorrow, storage.get_roster())
         _reply(event.reply_token, message)
         return
 
@@ -318,6 +317,13 @@ def handle_file(event: MessageEvent) -> None:
         return
 
     logger.info("extraction result for %r: %r", name, result)
+
+    try:
+        roster = extract_all_shifts_from_excel(file_bytes)
+        storage.set_roster(roster)
+    except Exception:
+        logger.exception("roster extraction failed")
+
     _apply_extraction_result(event, name, user_id, result)
 
 
@@ -381,7 +387,7 @@ async def send_shift_start_alerts(request: Request):
             continue
 
         if message is None:
-            message = _build_worker_list_message(today, users)
+            message = _build_worker_list_message(today, storage.get_roster())
         _push(user_id, f"まもなく出勤時刻です。\n{message}")
         storage.mark_shift_start_alert_sent(user_id, today)
         sent.append(user_id)

@@ -187,14 +187,51 @@ def _has_meiten_that_day(ws, col: int, max_row: int) -> bool:
     return False
 
 
-def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str):
-    """各行を調べ、日付列に文字(シフト記号)が並ぶ行だけを氏名の手がかりとして使う。
+def _build_entries_for_row(ws, row_idx: int, block_max: int, date_to_col: dict[dt.date, int], max_row: int):
+    """あるシフト記号行(row_idx)について、日付ごとの出勤エントリと休み確定日を組み立てる。
     出退勤時刻のように数値(時刻シリアル値)しか入らない行は自然に除外される。
-    一致した行が氏名の結合セルブロック内にあれば、その2〜3行下にある出勤・退勤時刻も取得する。
     出勤/休みの判定は出退勤時刻の有無を優先する(シフト記号が「○」等でも
     実際の時刻が入っていれば出勤扱い。夕方出勤スタッフなど特定の役割を持たない場合に対応)。"""
+    start_row = row_idx + _START_TIME_ROW_OFFSET
+    end_row = row_idx + _END_TIME_ROW_OFFSET
+
+    entries = []
+    off_dates: set[dt.date] = set()
+    for date_value, col in date_to_col.items():
+        code_text = _cell_text(ws.cell(row=row_idx, column=col).value)
+        start = _extract_time_hhmm(ws.cell(row=start_row, column=col).value) if start_row <= block_max else None
+        end = _extract_time_hhmm(ws.cell(row=end_row, column=col).value) if end_row <= block_max else None
+
+        if not (start and end):
+            # 出退勤時刻が入っていない日は、シフト記号が明示的な休み記号のときだけ「休み確定」とする
+            if code_text and code_text in _OFF_MARKERS:
+                off_dates.add(date_value)
+            continue
+
+        # 出退勤時刻が入っている=出勤日。シフト記号が「○」「◎」等の場合は
+        # 夕方出勤スタッフなどで特定の役割を持たないケースなので、役割は「遅」(遅番)扱いにする。
+        role = code_text if code_text and code_text not in _OFF_MARKERS else "遅"
+        add_meiten = "洋" in role and not _has_meiten_that_day(ws, col, max_row)
+        entries.append(
+            {
+                "date": date_value.isoformat(),
+                "start": start,
+                "end": end,
+                "role": role,
+                "add_meiten": add_meiten,
+            }
+        )
+
+    entries.sort(key=lambda e: e["date"])
+    return entries, sorted(d.isoformat() for d in off_dates)
+
+
+def _iter_employee_rows(ws, date_to_col: dict[dt.date, int]):
+    """シートを走査し、日付列に文字(シフト記号)が並ぶ行を氏名ブロックの手がかりとして
+    (氏名, row_idx, block_min, block_max) を1従業員につき1回だけ返す。"""
     first_data_col = min(date_to_col.values())
     max_row = min(ws.max_row or 0, _MAX_ROWS)
+    seen_names: set[str] = set()
 
     for row_idx in range(1, max_row + 1):
         string_cells = 0
@@ -209,41 +246,19 @@ def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str
         if not found:
             continue
         name, block_min, block_max = found
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        yield name, row_idx, block_min, block_max
+
+
+def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str):
+    max_row = min(ws.max_row or 0, _MAX_ROWS)
+    for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
         if not _names_match(name, user_name):
             continue
-
-        start_row = row_idx + _START_TIME_ROW_OFFSET
-        end_row = row_idx + _END_TIME_ROW_OFFSET
-
-        entries = []
-        off_dates: set[dt.date] = set()
-        for date_value, col in date_to_col.items():
-            code_text = _cell_text(ws.cell(row=row_idx, column=col).value)
-            start = _extract_time_hhmm(ws.cell(row=start_row, column=col).value) if start_row <= block_max else None
-            end = _extract_time_hhmm(ws.cell(row=end_row, column=col).value) if end_row <= block_max else None
-
-            if not (start and end):
-                # 出退勤時刻が入っていない日は、シフト記号が明示的な休み記号のときだけ「休み確定」とする
-                if code_text and code_text in _OFF_MARKERS:
-                    off_dates.add(date_value)
-                continue
-
-            # 出退勤時刻が入っている=出勤日。シフト記号が「○」「◎」等の場合は
-            # 夕方出勤スタッフなどで特定の役割を持たないケースなので、役割は「遅」(遅番)扱いにする。
-            role = code_text if code_text and code_text not in _OFF_MARKERS else "遅"
-            add_meiten = "洋" in role and not _has_meiten_that_day(ws, col, max_row)
-            entries.append(
-                {
-                    "date": date_value.isoformat(),
-                    "start": start,
-                    "end": end,
-                    "role": role,
-                    "add_meiten": add_meiten,
-                }
-            )
-
-        entries.sort(key=lambda e: e["date"])
-        return name, entries, sorted(d.isoformat() for d in off_dates)
+        entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, max_row)
+        return name, entries, off_dates
 
     return None, [], []
 
@@ -281,3 +296,28 @@ def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
         note = "対応している表の形式(日付が横に並んだヘッダー行を含む月間シフト表)が見つかりませんでした。"
 
     return {"shifts": [], "off_dates": [], "matched_name_in_table": None, "note": note}
+
+
+def extract_all_shifts_from_excel(file_bytes: bytes) -> dict[str, dict]:
+    """ファイル内の全従業員の出勤日・休み確定日を抽出する。
+    戻り値は {氏名: {"shifts": [...], "off_dates": [...]}} の形。"""
+    workbook = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    today = datetime.now(_JST).date()
+
+    for ws in _ordered_worksheets(workbook):
+        year_month_hint = _find_year_month(ws, today)
+        date_to_col = _find_day_header(ws, year_month_hint)
+        if not date_to_col:
+            continue
+
+        max_row = min(ws.max_row or 0, _MAX_ROWS)
+        results: dict[str, dict] = {}
+        for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
+            entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, max_row)
+            if entries or off_dates:
+                results[name] = {"shifts": entries, "off_dates": off_dates}
+
+        if results:
+            return results
+
+    return {}
