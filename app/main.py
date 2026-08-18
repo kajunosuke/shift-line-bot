@@ -17,6 +17,7 @@ from linebot.v3.messaging import (
     TextMessage as LineTextMessage,
 )
 from linebot.v3.webhooks import (
+    FileMessageContent,
     FollowEvent,
     ImageMessageContent,
     MessageEvent,
@@ -24,6 +25,7 @@ from linebot.v3.webhooks import (
 )
 
 from app import storage
+from app.excel_extract import extract_shift_dates_from_excel
 from app.vision import extract_shift_dates
 
 logging.basicConfig(level=logging.INFO)
@@ -61,9 +63,30 @@ def _push(user_id: str, text: str) -> None:
         )
 
 
-def _get_image_bytes(message_id: str) -> bytes:
+def _get_message_content(message_id: str) -> bytes:
     with ApiClient(_config) as api_client:
         return MessagingApiBlob(api_client).get_message_content(message_id)
+
+
+def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
+    shift_dates = sorted(set(result.get("shift_dates") or []))
+    storage.set_shifts(user_id, shift_dates)
+
+    if not shift_dates:
+        _reply(
+            event.reply_token,
+            f"「{name}」さんの出勤日が見つかりませんでした。\n"
+            "内容が鮮明か、登録名がシフト表の表記と一致しているかご確認のうえ、再度送ってください。",
+        )
+        return
+
+    lines = "\n".join(f"・{d}" for d in shift_dates)
+    note = result.get("note") or ""
+    message = f"「{name}」さんの出勤日を登録しました:\n{lines}"
+    if note:
+        message += f"\n\n(補足: {note})"
+    message += "\n\n各出勤日の前日 13:00 にリマインドをお送りします。"
+    _reply(event.reply_token, message)
 
 
 @handler.add(FollowEvent)
@@ -121,33 +144,50 @@ def handle_image(event: MessageEvent) -> None:
         return
 
     name = record["name"]
-    image_bytes = _get_image_bytes(event.message.id)
+    image_bytes = _get_message_content(event.message.id)
 
     try:
         result = extract_shift_dates(image_bytes, "image/jpeg", name)
     except Exception:
         logger.exception("shift extraction failed")
-        _reply(event.reply_token, "シフト表の解析に失敗しました。もう少し鮮明な写真で再度送ってください。")
+        _reply(event.reply_token, "シフト表の解析に失敗しました。もう少し鮮明な写真、またはExcelファイル(.xlsx)で再度送ってください。")
         return
 
-    shift_dates = sorted(set(result.get("shift_dates") or []))
-    storage.set_shifts(user_id, shift_dates)
+    _apply_extraction_result(event, name, user_id, result)
 
-    if not shift_dates:
+
+@handler.add(MessageEvent, message=FileMessageContent)
+def handle_file(event: MessageEvent) -> None:
+    user_id = event.source.user_id
+    record = storage.get_user(user_id)
+
+    if not record or not record.get("name"):
         _reply(
             event.reply_token,
-            f"「{name}」さんの出勤日が見つかりませんでした。\n"
-            "写真が鮮明か、登録名が表の表記と一致しているかご確認のうえ、再度送ってください。",
+            "先にあなたの名前を教えてください。シフト表に載っている表記をそのまま送ってください。",
         )
         return
 
-    lines = "\n".join(f"・{d}" for d in shift_dates)
-    note = result.get("note") or ""
-    message = f"「{name}」さんの出勤日を登録しました:\n{lines}"
-    if note:
-        message += f"\n\n(補足: {note})"
-    message += "\n\n各出勤日の前日 13:00 にリマインドをお送りします。"
-    _reply(event.reply_token, message)
+    file_name = (event.message.file_name or "").lower()
+    if not file_name.endswith((".xlsx", ".xlsm")):
+        _reply(
+            event.reply_token,
+            "対応しているファイル形式は Excel (.xlsx / .xlsm) のみです。\n"
+            "古い形式(.xls)の場合はExcelやスプレッドシートで開いて「.xlsx」形式で保存し直してから送ってください。",
+        )
+        return
+
+    name = record["name"]
+    file_bytes = _get_message_content(event.message.id)
+
+    try:
+        result = extract_shift_dates_from_excel(file_bytes, name)
+    except Exception:
+        logger.exception("excel shift extraction failed")
+        _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
+        return
+
+    _apply_extraction_result(event, name, user_id, result)
 
 
 @app.post("/webhook")

@@ -1,13 +1,8 @@
 import base64
-import json
-import os
-import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import anthropic
-
-_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from app.llm_common import client, extract_json
 
 _JST = ZoneInfo("Asia/Tokyo")
 
@@ -27,19 +22,11 @@ _PROMPT_TEMPLATE = """\
 """
 
 
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError(f"Claudeの応答からJSONを抽出できませんでした: {text!r}")
-    return json.loads(match.group(0))
-
-
 def extract_shift_dates(image_bytes: bytes, media_type: str, user_name: str) -> dict:
     today = datetime.now(_JST).strftime("%Y-%m-%d")
     prompt = _PROMPT_TEMPLATE.format(name=user_name, today=today)
 
-    response = _client.messages.create(
+    response = client.messages.create(
         model="claude-sonnet-5",
         max_tokens=2048,
         messages=[
@@ -61,4 +48,4 @@ def extract_shift_dates(image_bytes: bytes, media_type: str, user_name: str) -> 
     )
 
     text = "".join(block.text for block in response.content if block.type == "text")
-    return _extract_json(text)
+    return extract_json(text)
