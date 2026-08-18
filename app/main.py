@@ -294,6 +294,7 @@ def handle_file(event: MessageEvent) -> None:
         _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
         return
 
+    logger.info("extraction result for %r: %r", name, result)
     _apply_extraction_result(event, name, user_id, result)
 
 
