@@ -244,12 +244,23 @@ def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str
     return None, [], []
 
 
+_PREFERRED_SHEET_NAMES = ("配布用",)
+
+
+def _ordered_worksheets(workbook):
+    """「配布用」のような配布・印刷用シートがあれば、それを他のシートより優先して調べる。
+    社内マスター用シート(OP確認表など)は列構成が異なることが多く、誤って先にマッチしてしまうのを防ぐ。"""
+    preferred = [ws for ws in workbook.worksheets if ws.title in _PREFERRED_SHEET_NAMES]
+    rest = [ws for ws in workbook.worksheets if ws.title not in _PREFERRED_SHEET_NAMES]
+    return preferred + rest
+
+
 def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
     workbook = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     today = datetime.now(_JST).date()
     any_header_found = False
 
-    for ws in workbook.worksheets:
+    for ws in _ordered_worksheets(workbook):
         year_month_hint = _find_year_month(ws, today)
         date_to_col = _find_day_header(ws, year_month_hint)
         if not date_to_col:
@@ -257,7 +268,7 @@ def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
         any_header_found = True
 
         matched_name, shifts, off_dates = _extract_shifts_for_name(ws, date_to_col, user_name)
-        if matched_name:
+        if matched_name and (shifts or off_dates):
             return {"shifts": shifts, "off_dates": off_dates, "matched_name_in_table": matched_name, "note": ""}
 
     if any_header_found:
