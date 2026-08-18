@@ -26,8 +26,6 @@ from linebot.v3.webhooks import (
 
 from app import storage
 from app.excel_extract import extract_shift_dates_from_excel
-from app.pdf_extract import extract_shift_dates_from_pdf
-from app.vision import extract_shift_dates
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shiftbot")
@@ -74,11 +72,11 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
     storage.set_shifts(user_id, shift_dates)
 
     if not shift_dates:
-        _reply(
-            event.reply_token,
-            f"「{name}」さんの出勤日が見つかりませんでした。\n"
-            "内容が鮮明か、登録名がシフト表の表記と一致しているかご確認のうえ、再度送ってください。",
-        )
+        note = result.get("note") or ""
+        message = f"「{name}」さんの出勤日が見つかりませんでした。"
+        if note:
+            message += f"\n{note}"
+        _reply(event.reply_token, message)
         return
 
     lines = "\n".join(f"・{d}" for d in shift_dates)
@@ -96,7 +94,8 @@ def handle_follow(event: FollowEvent) -> None:
         event.reply_token,
         "友だち追加ありがとうございます!\n"
         "まず、シフト表に載っているあなたの表記(名前)を送ってください。\n"
-        "例:「田中」「たなか」など、表と同じ表記でお願いします。",
+        "例:「田中」「たなか」など、表と同じ表記でお願いします。\n"
+        "その後、シフト表のExcelファイル(.xlsx)を送っていただくと出勤日を抽出します。",
     )
 
 
@@ -120,7 +119,8 @@ def handle_text(event: MessageEvent) -> None:
         _reply(
             event.reply_token,
             f"「{text}」で登録しました。\n"
-            "次に、シフト表の写真を送ってください。あなたの出勤日を抽出します。\n"
+            "次に、シフト表のExcelファイル(.xlsx)を送ってください。あなたの出勤日を抽出します。\n"
+            "(LINEでは「+」メニューの「ファイル」から送ってください)\n"
             "(名前を間違えた場合は「名前変更 正しい名前」と送ってください)",
         )
         return
@@ -128,33 +128,16 @@ def handle_text(event: MessageEvent) -> None:
     _reply(
         event.reply_token,
         f"現在の登録名は「{record['name']}」です。\n"
-        "シフト表の写真を送ると出勤日を抽出します。名前を変える場合は「名前変更 新しい名前」と送ってください。",
+        "シフト表のExcelファイル(.xlsx)を送ると出勤日を抽出します。名前を変える場合は「名前変更 新しい名前」と送ってください。",
     )
 
 
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event: MessageEvent) -> None:
-    user_id = event.source.user_id
-    record = storage.get_user(user_id)
-
-    if not record or not record.get("name"):
-        _reply(
-            event.reply_token,
-            "先にあなたの名前を教えてください。シフト表に載っている表記をそのまま送ってください。",
-        )
-        return
-
-    name = record["name"]
-    image_bytes = _get_message_content(event.message.id)
-
-    try:
-        result = extract_shift_dates(image_bytes, "image/jpeg", name)
-    except Exception:
-        logger.exception("shift extraction failed")
-        _reply(event.reply_token, "シフト表の解析に失敗しました。もう少し鮮明な写真、またはExcelファイル(.xlsx)で再度送ってください。")
-        return
-
-    _apply_extraction_result(event, name, user_id, result)
+    _reply(
+        event.reply_token,
+        "写真からの読み取りには対応していません。シフト表のExcelファイル(.xlsx)を「+」メニューの「ファイル」から送ってください。",
+    )
 
 
 @handler.add(MessageEvent, message=FileMessageContent)
@@ -172,28 +155,20 @@ def handle_file(event: MessageEvent) -> None:
     file_name = (event.message.file_name or "").lower()
     name = record["name"]
 
-    if file_name.endswith((".xlsx", ".xlsm")):
-        file_bytes = _get_message_content(event.message.id)
-        try:
-            result = extract_shift_dates_from_excel(file_bytes, name)
-        except Exception:
-            logger.exception("excel shift extraction failed")
-            _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
-            return
-    elif file_name.endswith(".pdf"):
-        file_bytes = _get_message_content(event.message.id)
-        try:
-            result = extract_shift_dates_from_pdf(file_bytes, name)
-        except Exception:
-            logger.exception("pdf shift extraction failed")
-            _reply(event.reply_token, "PDFファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
-            return
-    else:
+    if not file_name.endswith(".xlsx"):
         _reply(
             event.reply_token,
-            "対応しているファイル形式は Excel (.xlsx / .xlsm) と PDF (.pdf) です。\n"
-            "古い形式(.xls)の場合はExcelやスプレッドシートで開いて「.xlsx」形式で保存し直してから送ってください。",
+            "対応しているファイル形式は Excel (.xlsx) のみです。\n"
+            "ファイルをExcelで開き、「名前を付けて保存」で「.xlsx」形式にしてから送ってください。",
         )
+        return
+
+    file_bytes = _get_message_content(event.message.id)
+    try:
+        result = extract_shift_dates_from_excel(file_bytes, name)
+    except Exception:
+        logger.exception("excel shift extraction failed")
+        _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
         return
 
     _apply_extraction_result(event, name, user_id, result)
