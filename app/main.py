@@ -60,6 +60,8 @@ _ROLE_NAMES = {
 
 _ROLE_KEYS_BY_LENGTH = sorted(_ROLE_NAMES, key=len, reverse=True)
 
+_ROLE_ORDER = ["ス", "洋", "パ", "牛", "飲", "和", "銘", "中", "遅", "研修"]
+
 
 def _full_role_name(code: str) -> str:
     if code in _ROLE_NAMES:
@@ -75,6 +77,17 @@ def _full_role_name(code: str) -> str:
     if not parts:
         return code
     return "と".join(parts)
+
+
+def _role_sort_key(role: str | None) -> int:
+    """役割の並び順(ス→洋→パ→牛→飲→和→銘→中→遅→研修)でのソートキーを返す。
+    組み合わせ記号(例:「ス洋」)は先頭に一致する役割の順位を使う。"""
+    if not role:
+        return len(_ROLE_ORDER)
+    matched_key = next((k for k in _ROLE_KEYS_BY_LENGTH if role.startswith(k)), None)
+    if matched_key is None or matched_key not in _ROLE_ORDER:
+        return len(_ROLE_ORDER)
+    return _ROLE_ORDER.index(matched_key)
 
 
 _LABEL_TODAY_LIST = "今日出勤リスト"
@@ -153,11 +166,13 @@ def _find_shift_for_date(shifts: list[dict], date_str: str) -> dict | None:
 
 
 def _build_worker_list_message(date_str: str, roster: dict) -> str:
-    lines = []
+    rows = []
     for name, record in roster.items():
         match = _find_shift_for_date(record.get("shifts") or [], date_str)
         if match:
-            lines.append(f"・{name}さん {_format_shift_details(match)}".rstrip())
+            rows.append((name, match))
+    rows.sort(key=lambda r: _role_sort_key(r[1].get("role")))
+    lines = [f"・{name}さん {_format_shift_details(match)}".rstrip() for name, match in rows]
     if lines:
         return f"{date_str}の出勤予定:\n" + "\n".join(lines)
     return f"{date_str}は出勤予定の人はいません。"
