@@ -103,6 +103,8 @@ _LABEL_TODAY_LIST = "本日の出勤者"
 _LABEL_AM_I_WORKING_TODAY = "今日は出勤？"
 _LABEL_TOMORROW_LIST = "明日の出勤者"
 _LABEL_AM_I_WORKING = "明日は出勤？"
+_LABEL_THIS_MONTH = "今月の出勤"
+_LABEL_THIS_MONTH_OFF = "今月の休日"
 
 
 def _default_quick_reply() -> QuickReply:
@@ -112,6 +114,8 @@ def _default_quick_reply() -> QuickReply:
             QuickReplyItem(action=MessageAction(label=_LABEL_TOMORROW_LIST, text=_LABEL_TOMORROW_LIST)),
             QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING_TODAY, text=_LABEL_AM_I_WORKING_TODAY)),
             QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING, text=_LABEL_AM_I_WORKING)),
+            QuickReplyItem(action=MessageAction(label=_LABEL_THIS_MONTH, text=_LABEL_THIS_MONTH)),
+            QuickReplyItem(action=MessageAction(label=_LABEL_THIS_MONTH_OFF, text=_LABEL_THIS_MONTH_OFF)),
         ]
     )
 
@@ -151,6 +155,15 @@ def _format_shift_line(shift: dict) -> str:
         line += f" {start}〜{end}"
     if role:
         line += f"(役割:{role})"
+    return line
+
+
+def _format_shift_time_only(shift: dict) -> str:
+    start = shift.get("start")
+    end = shift.get("end")
+    line = f"・{_format_date_jp(shift['date'])}"
+    if start and end:
+        line += f" {start}〜{end}"
     return line
 
 
@@ -305,6 +318,35 @@ def handle_text(event: MessageEvent) -> None:
             message = "明日は休みです。"
         else:
             message = "明日の予定が登録されていません。"
+        _reply(event.reply_token, message)
+        return
+
+    if text == _LABEL_THIS_MONTH:
+        today = datetime.now(_JST)
+        month_prefix = today.strftime("%Y-%m")
+        record = storage.get_user(user_id) or {}
+        month_shifts = sorted(
+            (s for s in (record.get("shifts") or []) if s["date"].startswith(month_prefix)),
+            key=lambda s: s["date"],
+        )
+        if month_shifts:
+            lines = "\n".join(_format_shift_time_only(s) for s in month_shifts)
+            message = f"{today.month}月の出勤日:\n{lines}"
+        else:
+            message = f"{today.month}月の出勤予定はありません。"
+        _reply(event.reply_token, message)
+        return
+
+    if text == _LABEL_THIS_MONTH_OFF:
+        today = datetime.now(_JST)
+        month_prefix = today.strftime("%Y-%m")
+        record = storage.get_user(user_id) or {}
+        month_off_dates = sorted(d for d in (record.get("off_dates") or []) if d.startswith(month_prefix))
+        if month_off_dates:
+            lines = "\n".join(f"・{_format_date_jp(d)}" for d in month_off_dates)
+            message = f"{today.month}月の休日:\n{lines}"
+        else:
+            message = f"{today.month}月の休日はありません。"
         _reply(event.reply_token, message)
         return
 
