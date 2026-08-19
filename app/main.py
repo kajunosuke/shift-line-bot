@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+from datetime import date as dt_date
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -9,6 +11,7 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
+    ConfirmTemplate,
     Configuration,
     MessageAction,
     MessagingApi,
@@ -17,6 +20,7 @@ from linebot.v3.messaging import (
     QuickReply,
     QuickReplyItem,
     ReplyMessageRequest,
+    TemplateMessage,
     TextMessage as LineTextMessage,
 )
 from linebot.v3.webhooks import (
@@ -105,6 +109,11 @@ _LABEL_TOMORROW_LIST = "明日の出勤者"
 _LABEL_AM_I_WORKING = "明日は出勤？"
 _LABEL_THIS_MONTH = "今月の出勤"
 _LABEL_THIS_MONTH_OFF = "今月の休日"
+_LABEL_SHIFT_EDIT = "シフト変更"
+_LABEL_CANCEL = "キャンセル"
+
+_SHIFT_EDIT_DATE_RE = re.compile(r"^\d{1,2}$")
+_SHIFT_EDIT_TIME_RE = re.compile(r"^\d{3,4}$")
 
 
 def _default_quick_reply() -> QuickReply:
@@ -116,17 +125,42 @@ def _default_quick_reply() -> QuickReply:
             QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING, text=_LABEL_AM_I_WORKING)),
             QuickReplyItem(action=MessageAction(label=_LABEL_THIS_MONTH, text=_LABEL_THIS_MONTH)),
             QuickReplyItem(action=MessageAction(label=_LABEL_THIS_MONTH_OFF, text=_LABEL_THIS_MONTH_OFF)),
+            QuickReplyItem(action=MessageAction(label=_LABEL_SHIFT_EDIT, text=_LABEL_SHIFT_EDIT)),
         ]
     )
 
 
-def _reply(reply_token: str, text: str, with_quick_reply: bool = True) -> None:
-    quick_reply = _default_quick_reply() if with_quick_reply else None
+def _flow_quick_reply() -> QuickReply:
+    return QuickReply(items=[QuickReplyItem(action=MessageAction(label=_LABEL_CANCEL, text=_LABEL_CANCEL))])
+
+
+def _reply(
+    reply_token: str, text: str, with_quick_reply: bool = True, quick_reply: QuickReply | None = None
+) -> None:
+    if quick_reply is None and with_quick_reply:
+        quick_reply = _default_quick_reply()
     with ApiClient(_config) as api_client:
         MessagingApi(api_client).reply_message(
             ReplyMessageRequest(
                 reply_token=reply_token,
                 messages=[LineTextMessage(text=text, quick_reply=quick_reply)],
+            )
+        )
+
+
+def _reply_confirm(reply_token: str, question: str) -> None:
+    template = ConfirmTemplate(
+        text=question,
+        actions=[
+            MessageAction(label="はい", text="はい"),
+            MessageAction(label="いいえ", text="いいえ"),
+        ],
+    )
+    with ApiClient(_config) as api_client:
+        MessagingApi(api_client).reply_message(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TemplateMessage(alt_text=question, template=template, quick_reply=_flow_quick_reply())],
             )
         )
 
@@ -237,6 +271,181 @@ def _schedule_next_shift_alert_for_date(target_date: str) -> None:
     schedule_next_shift_alert(alarm_dt)
 
 
+def _find_user_id_by_name(name: str) -> str | None:
+    for uid, record in storage.all_users().items():
+        if record.get("name") == name:
+            return uid
+    return None
+
+
+def _time_digits_to_hhmm(text: str) -> str | None:
+    """"630"→"6:30"、"0630"→"06:30"、"1000"→"10:00" のように3〜4桁の数字を時刻に変換する。"""
+    if not _SHIFT_EDIT_TIME_RE.match(text):
+        return None
+    if len(text) == 3:
+        hour, minute = int(text[0]), int(text[1:3])
+    else:
+        hour, minute = int(text[0:2]), int(text[2:4])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _start_shift_edit(event: MessageEvent, user_id: str) -> None:
+    roster = storage.get_roster()
+    if not roster:
+        _reply(event.reply_token, "名簿にまだ誰も登録されていません。先にシフト表のExcelファイルを送ってください。")
+        return
+
+    names = list(roster.keys())[:12]
+    storage.set_pending_edit(user_id, {"step": "awaiting_target_name"})
+    items = [QuickReplyItem(action=MessageAction(label=n[:20], text=n)) for n in names]
+    items.append(QuickReplyItem(action=MessageAction(label=_LABEL_CANCEL, text=_LABEL_CANCEL)))
+    _reply(event.reply_token, "誰のシフトを変更しますか?", quick_reply=QuickReply(items=items))
+
+
+def _cancel_shift_edit(event: MessageEvent, user_id: str) -> None:
+    storage.set_pending_edit(user_id, None)
+    _reply(event.reply_token, "シフト変更をキャンセルしました。")
+
+
+def _apply_shift_edit(user_id: str, state: dict, shifts: list[dict], off_dates: list[str]) -> None:
+    name = state["target_name"]
+    storage.update_roster_entry(name, shifts, off_dates)
+    target_user_id = _find_user_id_by_name(name)
+    if target_user_id:
+        storage.set_shifts(target_user_id, shifts, off_dates)
+
+    storage.set_pending_edit(user_id, None)
+
+    try:
+        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+        _schedule_next_shift_alert_for_date(tomorrow)
+    except Exception:
+        logger.exception("failed to schedule next shift alert")
+
+
+def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state: dict) -> None:
+    if text == _LABEL_CANCEL:
+        _cancel_shift_edit(event, user_id)
+        return
+
+    step = state.get("step")
+
+    if step == "awaiting_target_name":
+        roster = storage.get_roster()
+        if text not in roster:
+            _reply(event.reply_token, "候補にない名前です。ボタンから選ぶか「キャンセル」と送ってください。")
+            return
+        state["target_name"] = text
+        state["step"] = "awaiting_month"
+        storage.set_pending_edit(user_id, state)
+        _reply(event.reply_token, "何月ですか?(数字のみ。例:8)", quick_reply=_flow_quick_reply())
+        return
+
+    if step == "awaiting_month":
+        if not _SHIFT_EDIT_DATE_RE.match(text) or not (1 <= int(text) <= 12):
+            _reply(event.reply_token, "月を数字で送ってください(例:8)。", quick_reply=_flow_quick_reply())
+            return
+        state["month"] = int(text)
+        state["step"] = "awaiting_day"
+        storage.set_pending_edit(user_id, state)
+        _reply(event.reply_token, "何日ですか?(数字のみ。例:24)", quick_reply=_flow_quick_reply())
+        return
+
+    if step == "awaiting_day":
+        if not _SHIFT_EDIT_DATE_RE.match(text):
+            _reply(event.reply_token, "日を数字で送ってください(例:24)。", quick_reply=_flow_quick_reply())
+            return
+        year = datetime.now(_JST).year
+        try:
+            date_str = dt_date(year, state["month"], int(text)).isoformat()
+        except ValueError:
+            _reply(event.reply_token, "存在しない日付です。もう一度日にちを送ってください。", quick_reply=_flow_quick_reply())
+            return
+
+        state["date"] = date_str
+        state["step"] = "awaiting_confirm"
+        storage.set_pending_edit(user_id, state)
+
+        record = storage.get_roster().get(state["target_name"], {})
+        current = _find_shift_for_date(record.get("shifts") or [], date_str)
+        if current:
+            current_desc = _format_shift_details(current).strip("()") or "出勤"
+        elif date_str in (record.get("off_dates") or []):
+            current_desc = "休日"
+        else:
+            current_desc = "登録なし"
+        question = f"{state['target_name']}さんの{_format_date_jp(date_str)}のシフトは{current_desc}です。変更しますか?"
+        _reply_confirm(event.reply_token, question)
+        return
+
+    if step == "awaiting_confirm":
+        if text == "はい":
+            state["step"] = "awaiting_off_choice"
+            storage.set_pending_edit(user_id, state)
+            _reply_confirm(event.reply_token, "休日ですか?")
+        elif text == "いいえ":
+            _cancel_shift_edit(event, user_id)
+        else:
+            _reply_confirm(event.reply_token, "「はい」か「いいえ」で答えてください。")
+        return
+
+    if step == "awaiting_off_choice":
+        if text == "はい":
+            date_str = state["date"]
+            _apply_shift_edit(user_id, state, [], [date_str])
+            _reply(event.reply_token, f"{state['target_name']}さんの{_format_date_jp(date_str)}を休日に変更しました。")
+        elif text == "いいえ":
+            state["step"] = "awaiting_start"
+            storage.set_pending_edit(user_id, state)
+            _reply(
+                event.reply_token,
+                "出勤時間を入力してください(例:630 → 6:30、1000 → 10:00)",
+                quick_reply=_flow_quick_reply(),
+            )
+        else:
+            _reply_confirm(event.reply_token, "「はい」か「いいえ」で答えてください。")
+        return
+
+    if step == "awaiting_start":
+        hhmm = _time_digits_to_hhmm(text)
+        if hhmm is None:
+            _reply(event.reply_token, "3〜4桁の数字で送ってください(例:630、1000)。", quick_reply=_flow_quick_reply())
+            return
+        state["start"] = hhmm
+        state["step"] = "awaiting_end"
+        storage.set_pending_edit(user_id, state)
+        _reply(event.reply_token, "退勤時間を入力してください(例:1800)", quick_reply=_flow_quick_reply())
+        return
+
+    if step == "awaiting_end":
+        hhmm = _time_digits_to_hhmm(text)
+        if hhmm is None:
+            _reply(event.reply_token, "3〜4桁の数字で送ってください(例:1800)。", quick_reply=_flow_quick_reply())
+            return
+        state["end"] = hhmm
+        state["step"] = "awaiting_role"
+        storage.set_pending_edit(user_id, state)
+        _reply(event.reply_token, "役割を入力してください(例:ス)", quick_reply=_flow_quick_reply())
+        return
+
+    if step == "awaiting_role":
+        role = text.strip() or "遅"
+        date_str = state["date"]
+        shift_entry = {"date": date_str, "start": state["start"], "end": state["end"], "role": role, "add_meiten": False}
+        _apply_shift_edit(user_id, state, [shift_entry], [])
+        detail = _format_shift_details(shift_entry).strip("()")
+        _reply(
+            event.reply_token,
+            f"{state['target_name']}さんの{_format_date_jp(date_str)}を出勤({detail})に変更しました。",
+        )
+        return
+
+    storage.set_pending_edit(user_id, None)
+    _reply(event.reply_token, "エラーが発生しました。もう一度「シフト変更」から始めてください。")
+
+
 def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
     shifts = result.get("shifts") or []
     off_dates = result.get("off_dates") or []
@@ -280,6 +489,15 @@ def handle_follow(event: FollowEvent) -> None:
 def handle_text(event: MessageEvent) -> None:
     user_id = event.source.user_id
     text = event.message.text.strip()
+
+    pending_edit = storage.get_pending_edit(user_id)
+    if pending_edit is not None:
+        _handle_shift_edit_step(event, user_id, text, pending_edit)
+        return
+
+    if text == _LABEL_SHIFT_EDIT:
+        _start_shift_edit(event, user_id)
+        return
 
     if text == _LABEL_TODAY_LIST:
         today = datetime.now(_JST).strftime("%Y-%m-%d")

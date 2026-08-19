@@ -136,6 +136,38 @@ def get_roster() -> dict:
         return _read_json(_ROSTER_PATH)
 
 
+def update_roster_entry(name: str, shifts: list[dict], off_dates: list[str]) -> None:
+    """名簿のうち1人分だけをマージ更新する(シフト変更コマンド用)。"""
+    with _LOCK:
+        roster = _read_json(_ROSTER_PATH)
+        old_record = roster.get(name, {})
+        merged_shifts, merged_off = _merge_shift_data(
+            old_record.get("shifts", []), old_record.get("off_dates", []), shifts, off_dates
+        )
+        if merged_shifts or merged_off:
+            roster[name] = {"shifts": merged_shifts, "off_dates": merged_off}
+        elif name in roster:
+            del roster[name]
+        _write_json(_ROSTER_PATH, roster)
+
+
+def set_pending_edit(user_id: str, state: Optional[dict]) -> None:
+    with _LOCK:
+        data = _read_all()
+        record = data.get(user_id, {})
+        if state is None:
+            record.pop("pending_edit", None)
+        else:
+            record["pending_edit"] = state
+        data[user_id] = record
+        _write_all(data)
+
+
+def get_pending_edit(user_id: str) -> Optional[dict]:
+    with _LOCK:
+        return (_read_all().get(user_id) or {}).get("pending_edit")
+
+
 def prune_past_dates() -> None:
     """全利用者・名簿から、今日より前の日付を削除する。日付が変わるタイミングで
     専用のcronジョブから呼び出す想定(今日のデータは`>= today`の判定により保持される)。"""
