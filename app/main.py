@@ -282,7 +282,7 @@ def _build_worker_list_message(date_str: str, roster: dict) -> str:
     date_label = _format_date_jp(date_str)
     if lines:
         return f"{date_label}の出勤予定:\n" + "\n".join(lines)
-    return f"{date_label}は出勤予定の人はいません。"
+    return f"{date_label}は出勤予定の人はいません"
 
 
 def _time_str_to_minutes(time_str: str | None) -> int | None:
@@ -344,7 +344,7 @@ def _time_digits_to_hhmm(text: str) -> str | None:
 def _start_shift_edit(event: MessageEvent, user_id: str) -> None:
     roster = storage.get_roster()
     if not roster:
-        _reply(event.reply_token, "名簿にまだ誰も登録されていません。先にシフト表のExcelファイルを送ってください。")
+        _reply(event.reply_token, "名簿にまだ誰も登録されていません 先にシフト表のExcelファイルを送ってください")
         return
 
     names = list(roster.keys())[:12]
@@ -356,7 +356,7 @@ def _start_shift_edit(event: MessageEvent, user_id: str) -> None:
 
 def _cancel_shift_edit(event: MessageEvent, user_id: str) -> None:
     storage.set_pending_edit(user_id, None)
-    _reply(event.reply_token, "シフト変更をキャンセルしました。")
+    _reply(event.reply_token, "シフト変更をキャンセルしました")
 
 
 def _apply_shift_edit(user_id: str, state: dict, shifts: list[dict], off_dates: list[str]) -> None:
@@ -388,7 +388,7 @@ def _proceed_after_day_selected(event, user_id: str, state: dict, date_str: str)
         current_desc = "休日"
     else:
         current_desc = "登録なし"
-    question = f"{state['target_name']}さんの{_format_date_jp(date_str)}のシフトは{current_desc}です。変更しますか?"
+    question = f"{state['target_name']}さんの{_format_date_jp(date_str)}のシフトは{current_desc}です 変更しますか?"
     _reply_confirm(event.reply_token, question)
 
 
@@ -402,7 +402,7 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
     if step == "awaiting_target_name":
         roster = storage.get_roster()
         if text not in roster:
-            _reply(event.reply_token, "候補にない名前です。ボタンから選ぶか「キャンセル」と送ってください。")
+            _reply(event.reply_token, "候補にない名前です ボタンから選ぶか「キャンセル」と送ってください")
             return
         state["target_name"] = text
         state["step"] = "awaiting_month"
@@ -412,18 +412,18 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
 
     if step == "awaiting_month":
         if not _SHIFT_EDIT_DATE_RE.match(text) or int(text) not in _shift_edit_month_options():
-            _reply(event.reply_token, "ボタンから月を選んでください。", quick_reply=_month_quick_reply())
+            _reply(event.reply_token, "ボタンから月を選んでください", quick_reply=_month_quick_reply())
             return
         month = int(text)
         state["month"] = month
         state["step"] = "awaiting_day"
         storage.set_pending_edit(user_id, state)
-        _reply(event.reply_token, "日付を選んでください。", quick_reply=_day_quick_reply(month))
+        _reply(event.reply_token, "日付を選んでください", quick_reply=_day_quick_reply(month))
         return
 
     if step == "awaiting_day":
         # 日付は下のボタン(日付ピッカー)から選ぶ想定。テキストで来た場合は再度案内する。
-        _reply(event.reply_token, "下のボタンから日付を選んでください。", quick_reply=_day_quick_reply(state["month"]))
+        _reply(event.reply_token, "下のボタンから日付を選んでください", quick_reply=_day_quick_reply(state["month"]))
         return
 
     if step == "awaiting_confirm":
@@ -434,14 +434,14 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
         elif text == "いいえ":
             _cancel_shift_edit(event, user_id)
         else:
-            _reply_confirm(event.reply_token, "「はい」か「いいえ」で答えてください。")
+            _reply_confirm(event.reply_token, "「はい」か「いいえ」で答えてください")
         return
 
     if step == "awaiting_off_choice":
         if text == "はい":
             date_str = state["date"]
             _apply_shift_edit(user_id, state, [], [date_str])
-            _reply(event.reply_token, f"{state['target_name']}さんの{_format_date_jp(date_str)}を休日に変更しました。")
+            _reply(event.reply_token, f"{state['target_name']}さんの{_format_date_jp(date_str)}を休日に変更しました")
         elif text == "いいえ":
             state["step"] = "awaiting_start"
             storage.set_pending_edit(user_id, state)
@@ -451,13 +451,13 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
                 quick_reply=_flow_quick_reply(),
             )
         else:
-            _reply_confirm(event.reply_token, "「はい」か「いいえ」で答えてください。")
+            _reply_confirm(event.reply_token, "「はい」か「いいえ」で答えてください")
         return
 
     if step == "awaiting_start":
         hhmm = _time_digits_to_hhmm(text)
         if hhmm is None:
-            _reply(event.reply_token, "3〜4桁の数字で送ってください(例:630、1000)。", quick_reply=_flow_quick_reply())
+            _reply(event.reply_token, "3〜4桁の数字で送ってください(例:630、1000)", quick_reply=_flow_quick_reply())
             return
         state["start"] = hhmm
         state["step"] = "awaiting_end"
@@ -468,7 +468,7 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
     if step == "awaiting_end":
         hhmm = _time_digits_to_hhmm(text)
         if hhmm is None:
-            _reply(event.reply_token, "3〜4桁の数字で送ってください(例:1800)。", quick_reply=_flow_quick_reply())
+            _reply(event.reply_token, "3〜4桁の数字で送ってください(例:1800)", quick_reply=_flow_quick_reply())
             return
         state["end"] = hhmm
         state["step"] = "awaiting_role"
@@ -484,12 +484,12 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
         detail = _format_shift_details(shift_entry).strip("()")
         _reply(
             event.reply_token,
-            f"{state['target_name']}さんの{_format_date_jp(date_str)}を出勤({detail})に変更しました。",
+            f"{state['target_name']}さんの{_format_date_jp(date_str)}を出勤({detail})に変更しました",
         )
         return
 
     storage.set_pending_edit(user_id, None)
-    _reply(event.reply_token, "エラーが発生しました。もう一度「シフト変更」から始めてください。")
+    _reply(event.reply_token, "エラーが発生しました もう一度「シフト変更」から始めてください")
 
 
 def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
@@ -500,7 +500,7 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
     note = result.get("note") or ""
 
     if not result.get("matched_name_in_table"):
-        message = f"「{name}」さんの出勤日が見つかりませんでした。"
+        message = f"「{name}」さんの出勤日が見つかりませんでした"
         if note:
             message += f"\n{note}"
         _reply(event.reply_token, message)
@@ -509,14 +509,14 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
     # 表示は保存後(過去日付を除いた・既存データとマージ済み)のデータを使う
     stored_shifts = (storage.get_user(user_id) or {}).get("shifts") or []
     if not stored_shifts:
-        _reply(event.reply_token, f"「{name}」さんの出勤日が見つかりませんでした。")
+        _reply(event.reply_token, f"「{name}」さんの出勤日が見つかりませんでした")
         return
 
     lines = "\n".join(_format_shift_line(s) for s in stored_shifts)
     message = f"「{name}」さんの出勤日を登録しました:\n{lines}"
     if note:
         message += f"\n\n(補足: {note})"
-    message += "\n\n各出勤日の前日 13:00 にリマインドをお送りします。"
+    message += "\n\n各出勤日の前日 13:00 にリマインドをお送りします"
     _reply(event.reply_token, message)
 
 
@@ -525,9 +525,9 @@ def handle_follow(event: FollowEvent) -> None:
     _reply(
         event.reply_token,
         "友だち追加ありがとうございます!\n"
-        "まず、シフト表に載っているあなたの表記(名前)を送ってください。\n"
-        "例:「田中」「たなか」など、表と同じ表記でお願いします。\n"
-        "その後、シフト表のExcelファイル(.xlsx)を送っていただくと出勤日を抽出します。",
+        "まず、シフト表に載っているあなたの表記(名前)を送ってください\n"
+        "例:「田中」「たなか」など、表と同じ表記でお願いします\n"
+        "その後、シフト表のExcelファイル(.xlsx)を送っていただくと出勤日を抽出します",
     )
 
 
@@ -559,9 +559,9 @@ def handle_text(event: MessageEvent) -> None:
             detail = _format_shift_details(match).strip("()")
             message = f"今日は出勤日です\n{detail}" if detail else "今日は出勤日です"
         elif today in (record.get("off_dates") or []):
-            message = "今日は休みです。"
+            message = "今日は休みです"
         else:
-            message = "今日の予定が登録されていません。"
+            message = "今日の予定が登録されていません"
         _reply(event.reply_token, message)
         return
 
@@ -579,9 +579,9 @@ def handle_text(event: MessageEvent) -> None:
             detail = _format_shift_details(match).strip("()")
             message = f"明日は出勤日です\n{detail}" if detail else "明日は出勤日です"
         elif tomorrow in (record.get("off_dates") or []):
-            message = "明日は休みです。"
+            message = "明日は休みです"
         else:
-            message = "明日の予定が登録されていません。"
+            message = "明日の予定が登録されていません"
         _reply(event.reply_token, message)
         return
 
@@ -597,7 +597,7 @@ def handle_text(event: MessageEvent) -> None:
             lines = "\n".join(_format_shift_time_only(s) for s in month_shifts)
             message = f"{today.month}月の出勤日:\n{lines}"
         else:
-            message = f"{today.month}月の出勤予定はありません。"
+            message = f"{today.month}月の出勤予定はありません"
         _reply(event.reply_token, message)
         return
 
@@ -610,17 +610,17 @@ def handle_text(event: MessageEvent) -> None:
             lines = "\n".join(f"・{_format_date_jp(d)}" for d in month_off_dates)
             message = f"{today.month}月の休日:\n{lines}"
         else:
-            message = f"{today.month}月の休日はありません。"
+            message = f"{today.month}月の休日はありません"
         _reply(event.reply_token, message)
         return
 
     if text.startswith("名前変更"):
         new_name = text.replace("名前変更", "", 1).strip()
         if not new_name:
-            _reply(event.reply_token, "「名前変更 新しい名前」の形式で送ってください。")
+            _reply(event.reply_token, "「名前変更 新しい名前」の形式で送ってください")
             return
         storage.set_name(user_id, new_name)
-        _reply(event.reply_token, f"登録名を「{new_name}」に変更しました。")
+        _reply(event.reply_token, f"登録名を「{new_name}」に変更しました")
         return
 
     record = storage.get_user(user_id)
@@ -628,8 +628,8 @@ def handle_text(event: MessageEvent) -> None:
         storage.set_name(user_id, text)
         _reply(
             event.reply_token,
-            f"「{text}」で登録しました。\n"
-            "次に、シフト表のExcelファイル(.xlsx)を送ってください。あなたの出勤日を抽出します。\n"
+            f"「{text}」で登録しました\n"
+            "次に、シフト表のExcelファイル(.xlsx)を送ってください あなたの出勤日を抽出します\n"
             "(LINEでは「+」メニューの「ファイル」から送ってください)\n"
             "(名前を間違えた場合は「名前変更 正しい名前」と送ってください)",
         )
@@ -637,8 +637,8 @@ def handle_text(event: MessageEvent) -> None:
 
     _reply(
         event.reply_token,
-        f"現在の登録名は「{record['name']}」です。\n"
-        "シフト表のExcelファイル(.xlsx)を送ると出勤日を抽出します。名前を変える場合は「名前変更 新しい名前」と送ってください。",
+        f"現在の登録名は「{record['name']}」です\n"
+        "シフト表のExcelファイル(.xlsx)を送ると出勤日を抽出します 名前を変える場合は「名前変更 新しい名前」と送ってください",
     )
 
 
@@ -655,12 +655,12 @@ def handle_postback(event: PostbackEvent) -> None:
     params = event.postback.params
     date_str = params.get("date") if isinstance(params, dict) else getattr(params, "date", None)
     if not date_str:
-        _reply(event.reply_token, "日付の取得に失敗しました。もう一度お試しください。", quick_reply=_day_quick_reply(state["month"]))
+        _reply(event.reply_token, "日付の取得に失敗しました もう一度お試しください", quick_reply=_day_quick_reply(state["month"]))
         return
 
     picked = datetime.strptime(date_str, "%Y-%m-%d").date()
     if picked.month != state["month"] or picked < datetime.now(_JST).date():
-        _reply(event.reply_token, "選べる範囲の日付を選んでください。", quick_reply=_day_quick_reply(state["month"]))
+        _reply(event.reply_token, "選べる範囲の日付を選んでください", quick_reply=_day_quick_reply(state["month"]))
         return
 
     _proceed_after_day_selected(event, user_id, state, date_str)
@@ -670,7 +670,7 @@ def handle_postback(event: PostbackEvent) -> None:
 def handle_image(event: MessageEvent) -> None:
     _reply(
         event.reply_token,
-        "写真からの読み取りには対応していません。シフト表のExcelファイル(.xlsx)を「+」メニューの「ファイル」から送ってください。",
+        "写真からの読み取りには対応していません シフト表のExcelファイル(.xlsx)を「+」メニューの「ファイル」から送ってください",
     )
 
 
@@ -682,7 +682,7 @@ def handle_file(event: MessageEvent) -> None:
     if not record or not record.get("name"):
         _reply(
             event.reply_token,
-            "先にあなたの名前を教えてください。シフト表に載っている表記をそのまま送ってください。",
+            "先にあなたの名前を教えてください シフト表に載っている表記をそのまま送ってください",
         )
         return
 
@@ -692,8 +692,8 @@ def handle_file(event: MessageEvent) -> None:
     if not file_name.endswith(".xlsx"):
         _reply(
             event.reply_token,
-            "対応しているファイル形式は Excel (.xlsx) のみです。\n"
-            "ファイルをExcelで開き、「名前を付けて保存」で「.xlsx」形式にしてから送ってください。",
+            "対応しているファイル形式は Excel (.xlsx) のみです\n"
+            "ファイルをExcelで開き、「名前を付けて保存」で「.xlsx」形式にしてから送ってください",
         )
         return
 
@@ -702,7 +702,7 @@ def handle_file(event: MessageEvent) -> None:
         result = extract_shift_dates_from_excel(file_bytes, name)
     except Exception:
         logger.exception("excel shift extraction failed")
-        _reply(event.reply_token, "Excelファイルの解析に失敗しました。ファイルが壊れていないか確認して再度送ってください。")
+        _reply(event.reply_token, "Excelファイルの解析に失敗しました ファイルが壊れていないか確認して再度送ってください")
         return
 
     logger.info("extraction result for %r: %r", name, result)
@@ -747,10 +747,10 @@ async def send_reminders(request: Request):
         match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
         if match:
             detail_part = _format_shift_details(match)
-            _push(user_id, f"【リマインド】明日 {tomorrow_label} は出勤日です{detail_part}。{name}さん 忘れずに!")
+            _push(user_id, f"【リマインド】明日 {tomorrow_label} は出勤日です{detail_part} {name}さん 忘れずに!")
             sent.append(user_id)
         elif tomorrow in (record.get("off_dates") or []):
-            _push(user_id, f"【リマインド】明日 {tomorrow_label} は休みです。{name}さん ゆっくり休んでください。")
+            _push(user_id, f"【リマインド】明日 {tomorrow_label} は休みです {name}さん ゆっくり休んでください")
             sent.append(user_id)
 
     try:
@@ -789,7 +789,7 @@ async def send_shift_start_alerts(request: Request):
 
         if message is None:
             message = _build_worker_list_message(today, storage.get_roster())
-        _push(user_id, f"まもなく出勤時刻です。\n{message}")
+        _push(user_id, f"まもなく出勤時刻です\n{message}")
         storage.mark_shift_start_alert_sent(user_id, today)
         sent.append(user_id)
 
