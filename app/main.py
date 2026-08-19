@@ -13,6 +13,7 @@ from linebot.v3.messaging import (
     ApiClient,
     ConfirmTemplate,
     Configuration,
+    DatetimePickerAction,
     MessageAction,
     MessagingApi,
     MessagingApiBlob,
@@ -28,6 +29,7 @@ from linebot.v3.webhooks import (
     FollowEvent,
     ImageMessageContent,
     MessageEvent,
+    PostbackEvent,
     TextMessageContent,
 )
 
@@ -114,6 +116,7 @@ _LABEL_CANCEL = "キャンセル"
 
 _SHIFT_EDIT_DATE_RE = re.compile(r"^\d{1,2}$")
 _SHIFT_EDIT_TIME_RE = re.compile(r"^\d{3,4}$")
+_SHIFT_EDIT_DAY_POSTBACK_DATA = "shift_edit_day"
 
 
 def _default_quick_reply() -> QuickReply:
@@ -132,6 +135,53 @@ def _default_quick_reply() -> QuickReply:
 
 def _flow_quick_reply() -> QuickReply:
     return QuickReply(items=[QuickReplyItem(action=MessageAction(label=_LABEL_CANCEL, text=_LABEL_CANCEL))])
+
+
+def _shift_edit_month_options() -> list[int]:
+    """シフト変更で選べる月(当月・翌月)を返す。"""
+    current_month = datetime.now(_JST).month
+    next_month = current_month % 12 + 1
+    return [current_month, next_month]
+
+
+def _shift_edit_year_for_month(month: int) -> int:
+    """指定した月が「当月より前」なら年をまたいでいる(例:12月→1月)とみなし、翌年を返す。"""
+    today = datetime.now(_JST)
+    return today.year + 1 if month < today.month else today.year
+
+
+def _month_quick_reply() -> QuickReply:
+    items = [
+        QuickReplyItem(action=MessageAction(label=f"{m}月", text=str(m))) for m in _shift_edit_month_options()
+    ]
+    items.append(QuickReplyItem(action=MessageAction(label=_LABEL_CANCEL, text=_LABEL_CANCEL)))
+    return QuickReply(items=items)
+
+
+def _day_quick_reply(month: int) -> QuickReply:
+    today = datetime.now(_JST).date()
+    year = _shift_edit_year_for_month(month)
+    next_month_first = dt_date(year + 1, 1, 1) if month == 12 else dt_date(year, month + 1, 1)
+    last_day = (next_month_first - timedelta(days=1)).day
+    # 当月を選んでいる場合は、今日より前の日を選べないようにする
+    first_selectable = today if (year, month) == (today.year, today.month) else dt_date(year, month, 1)
+    min_date = first_selectable.isoformat()
+    max_date = f"{year:04d}-{month:02d}-{last_day:02d}"
+    return QuickReply(
+        items=[
+            QuickReplyItem(
+                action=DatetimePickerAction(
+                    label="日付を選ぶ",
+                    data=_SHIFT_EDIT_DAY_POSTBACK_DATA,
+                    mode="date",
+                    initial=min_date,
+                    min=min_date,
+                    max=max_date,
+                )
+            ),
+            QuickReplyItem(action=MessageAction(label=_LABEL_CANCEL, text=_LABEL_CANCEL)),
+        ]
+    )
 
 
 def _reply(
@@ -325,6 +375,23 @@ def _apply_shift_edit(user_id: str, state: dict, shifts: list[dict], off_dates: 
         logger.exception("failed to schedule next shift alert")
 
 
+def _proceed_after_day_selected(event, user_id: str, state: dict, date_str: str) -> None:
+    state["date"] = date_str
+    state["step"] = "awaiting_confirm"
+    storage.set_pending_edit(user_id, state)
+
+    record = storage.get_roster().get(state["target_name"], {})
+    current = _find_shift_for_date(record.get("shifts") or [], date_str)
+    if current:
+        current_desc = _format_shift_details(current).strip("()") or "出勤"
+    elif date_str in (record.get("off_dates") or []):
+        current_desc = "休日"
+    else:
+        current_desc = "登録なし"
+    question = f"{state['target_name']}さんの{_format_date_jp(date_str)}のシフトは{current_desc}です。変更しますか?"
+    _reply_confirm(event.reply_token, question)
+
+
 def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state: dict) -> None:
     if text == _LABEL_CANCEL:
         _cancel_shift_edit(event, user_id)
@@ -340,44 +407,23 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
         state["target_name"] = text
         state["step"] = "awaiting_month"
         storage.set_pending_edit(user_id, state)
-        _reply(event.reply_token, "何月ですか?(数字のみ。例:8)", quick_reply=_flow_quick_reply())
+        _reply(event.reply_token, "何月ですか?", quick_reply=_month_quick_reply())
         return
 
     if step == "awaiting_month":
-        if not _SHIFT_EDIT_DATE_RE.match(text) or not (1 <= int(text) <= 12):
-            _reply(event.reply_token, "月を数字で送ってください(例:8)。", quick_reply=_flow_quick_reply())
+        if not _SHIFT_EDIT_DATE_RE.match(text) or int(text) not in _shift_edit_month_options():
+            _reply(event.reply_token, "ボタンから月を選んでください。", quick_reply=_month_quick_reply())
             return
-        state["month"] = int(text)
+        month = int(text)
+        state["month"] = month
         state["step"] = "awaiting_day"
         storage.set_pending_edit(user_id, state)
-        _reply(event.reply_token, "何日ですか?(数字のみ。例:24)", quick_reply=_flow_quick_reply())
+        _reply(event.reply_token, "日付を選んでください。", quick_reply=_day_quick_reply(month))
         return
 
     if step == "awaiting_day":
-        if not _SHIFT_EDIT_DATE_RE.match(text):
-            _reply(event.reply_token, "日を数字で送ってください(例:24)。", quick_reply=_flow_quick_reply())
-            return
-        year = datetime.now(_JST).year
-        try:
-            date_str = dt_date(year, state["month"], int(text)).isoformat()
-        except ValueError:
-            _reply(event.reply_token, "存在しない日付です。もう一度日にちを送ってください。", quick_reply=_flow_quick_reply())
-            return
-
-        state["date"] = date_str
-        state["step"] = "awaiting_confirm"
-        storage.set_pending_edit(user_id, state)
-
-        record = storage.get_roster().get(state["target_name"], {})
-        current = _find_shift_for_date(record.get("shifts") or [], date_str)
-        if current:
-            current_desc = _format_shift_details(current).strip("()") or "出勤"
-        elif date_str in (record.get("off_dates") or []):
-            current_desc = "休日"
-        else:
-            current_desc = "登録なし"
-        question = f"{state['target_name']}さんの{_format_date_jp(date_str)}のシフトは{current_desc}です。変更しますか?"
-        _reply_confirm(event.reply_token, question)
+        # 日付は下のボタン(日付ピッカー)から選ぶ想定。テキストで来た場合は再度案内する。
+        _reply(event.reply_token, "下のボタンから日付を選んでください。", quick_reply=_day_quick_reply(state["month"]))
         return
 
     if step == "awaiting_confirm":
@@ -594,6 +640,30 @@ def handle_text(event: MessageEvent) -> None:
         f"現在の登録名は「{record['name']}」です。\n"
         "シフト表のExcelファイル(.xlsx)を送ると出勤日を抽出します。名前を変える場合は「名前変更 新しい名前」と送ってください。",
     )
+
+
+@handler.add(PostbackEvent)
+def handle_postback(event: PostbackEvent) -> None:
+    if event.postback.data != _SHIFT_EDIT_DAY_POSTBACK_DATA:
+        return
+
+    user_id = event.source.user_id
+    state = storage.get_pending_edit(user_id)
+    if not state or state.get("step") != "awaiting_day":
+        return
+
+    params = event.postback.params
+    date_str = params.get("date") if isinstance(params, dict) else getattr(params, "date", None)
+    if not date_str:
+        _reply(event.reply_token, "日付の取得に失敗しました。もう一度お試しください。", quick_reply=_day_quick_reply(state["month"]))
+        return
+
+    picked = datetime.strptime(date_str, "%Y-%m-%d").date()
+    if picked.month != state["month"] or picked < datetime.now(_JST).date():
+        _reply(event.reply_token, "選べる範囲の日付を選んでください。", quick_reply=_day_quick_reply(state["month"]))
+        return
+
+    _proceed_after_day_selected(event, user_id, state, date_str)
 
 
 @handler.add(MessageEvent, message=ImageMessageContent)

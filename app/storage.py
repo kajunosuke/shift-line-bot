@@ -111,12 +111,18 @@ def all_users() -> dict:
 def set_roster(roster: dict) -> None:
     """名簿を更新する。新しいファイルに載っている日付だけを反映し、
     載っていない日付や、今回のファイルに登場しなかった人の既存データは保持する
-    (今日より前の日付は自動的に取り除く)。"""
+    (今日より前の日付は自動的に取り除く)。並び順は、既存の並びをそのまま維持し、
+    新しく現れた人だけを(表に出てきた順で)末尾に追加する。"""
     with _LOCK:
         existing = _read_json(_ROSTER_PATH)
         merged: dict[str, dict] = {}
 
-        for name in set(existing) | set(roster):
+        ordered_names = list(existing.keys())
+        for name in roster.keys():
+            if name not in existing:
+                ordered_names.append(name)
+
+        for name in ordered_names:
             old_record = existing.get(name, {})
             new_record = roster.get(name, {})
             merged_shifts, merged_off = _merge_shift_data(
