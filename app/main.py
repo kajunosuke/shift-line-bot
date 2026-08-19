@@ -229,16 +229,22 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
     off_dates = result.get("off_dates") or []
     storage.set_shifts(user_id, shifts, off_dates)
 
-    if not shifts:
-        note = result.get("note") or ""
+    note = result.get("note") or ""
+
+    if not result.get("matched_name_in_table"):
         message = f"「{name}」さんの出勤日が見つかりませんでした。"
         if note:
             message += f"\n{note}"
         _reply(event.reply_token, message)
         return
 
-    lines = "\n".join(_format_shift_line(s) for s in shifts)
-    note = result.get("note") or ""
+    # 表示は保存後(過去日付を除いた・既存データとマージ済み)のデータを使う
+    stored_shifts = (storage.get_user(user_id) or {}).get("shifts") or []
+    if not stored_shifts:
+        _reply(event.reply_token, f"「{name}」さんの出勤日が見つかりませんでした。")
+        return
+
+    lines = "\n".join(_format_shift_line(s) for s in stored_shifts)
     message = f"「{name}」さんの出勤日を登録しました:\n{lines}"
     if note:
         message += f"\n\n(補足: {note})"
