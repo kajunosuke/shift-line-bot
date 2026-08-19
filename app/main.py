@@ -99,18 +99,18 @@ def _format_date_jp(date_str: str) -> str:
     return f"{d.month}月{d.day}日({_WEEKDAY_JP[d.weekday()]})"
 
 
-_LABEL_TODAY_LIST = "今日出勤リスト"
-_LABEL_AM_I_WORKING_TODAY = "今日の自分は出勤？"
-_LABEL_TOMORROW_LIST = "明日出勤リスト"
-_LABEL_AM_I_WORKING = "明日の自分は出勤？"
+_LABEL_TODAY_LIST = "本日の出勤者"
+_LABEL_AM_I_WORKING_TODAY = "今日は出勤？"
+_LABEL_TOMORROW_LIST = "明日の出勤者"
+_LABEL_AM_I_WORKING = "明日は出勤？"
 
 
 def _default_quick_reply() -> QuickReply:
     return QuickReply(
         items=[
             QuickReplyItem(action=MessageAction(label=_LABEL_TODAY_LIST, text=_LABEL_TODAY_LIST)),
-            QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING_TODAY, text=_LABEL_AM_I_WORKING_TODAY)),
             QuickReplyItem(action=MessageAction(label=_LABEL_TOMORROW_LIST, text=_LABEL_TOMORROW_LIST)),
+            QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING_TODAY, text=_LABEL_AM_I_WORKING_TODAY)),
             QuickReplyItem(action=MessageAction(label=_LABEL_AM_I_WORKING, text=_LABEL_AM_I_WORKING)),
         ]
     )
