@@ -37,12 +37,9 @@
 - `app/excel_extract.py` … openpyxlでExcelのセル構造を解析し、該当者の出勤日をルールベースで抽出
 - `app/storage.py` … 利用者ごとの名前・出勤日をJSONファイル(`data/users.json`)に保存する簡易ストレージ
 - `.github/workflows/daily-reminder.yml` … 毎日13:00 JSTに `/internal/send-reminders` を叩くGitHub Actions
-- `.github/workflows/shift-start-alert.yml` … 5分おきに `/internal/send-shift-start-alerts` を叩くGitHub Actions(出勤10分前通知用)
 - `render.yaml` … Renderへのデプロイ設定
 
-## GitHub Actionsの実行時間について
-
-`shift-start-alert.yml` は5分おき(1日288回)に実行されます。**非公開(Private)リポジトリだと月2000分の無料枠を超える**ため、このリポジトリは**公開(Public)** にしてください。コード自体は公開されますが、Excelファイルの中身やLINEのアクセストークンなどはリポジトリに含まれないので、シフト内容や個人情報が漏れることはありません。
+`/internal/send-shift-start-alerts`(出勤10分前通知用)は5分おきの実行が必要ですが、GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、こちらは**cron-job.org**(外部の無料cronサービス)から5分おきにPOSTする運用にしています。GitHub Actions側にはこのジョブは含めていません。
 
 ## セットアップ手順
 
@@ -89,17 +86,23 @@ git commit -m "Initial commit: shift reminder LINE bot"
 
 「Messaging API設定」タブの Webhook URL に `https://<Renderのドメイン>/webhook` を設定し、「検証」で成功することを確認。
 
-### 5. GitHub Actionsでリマインド送信をスケジュール
+### 5. GitHub Actionsで日次リマインドをスケジュール
 
 リポジトリの Settings → Secrets and variables → Actions で以下を登録:
 
 - `REMINDER_ENDPOINT_URL` = `https://<Renderのドメイン>/internal/send-reminders`
-- `SHIFT_ALERT_ENDPOINT_URL` = `https://<Renderのドメイン>/internal/send-shift-start-alerts`
 - `REMINDER_TRIGGER_TOKEN` = Renderに設定したものと同じ値
 
-`.github/workflows/daily-reminder.yml` が毎日04:00 UTC(=13:00 JST)に自動実行され、翌日が出勤日/休みの利用者に通知をpushします。
-`.github/workflows/shift-start-alert.yml` は5分おきに自動実行され、出勤時刻の10分前を過ぎた利用者に、その日の出勤者リストをpushします(前述の通り、このリポジトリは公開にしてください)。
-どちらも手動実行は Actions タブの「Run workflow」から可能です。
+`.github/workflows/daily-reminder.yml` が毎日04:00 UTC(=13:00 JST)に自動実行され、翌日が出勤日/休みの利用者に通知をpushします。手動実行は Actions タブの「Run workflow」から可能です。
+
+### 6. cron-job.orgで出勤10分前通知をスケジュール
+
+1. https://cron-job.org/ で無料アカウントを作成
+2. 「CREATE CRONJOB」で新しいジョブを作成:
+   - URL: `https://<Renderのドメイン>/internal/send-shift-start-alerts?token=<REMINDER_TRIGGER_TOKENの値>`
+   - Schedule: Every 5 minutes
+   - Request method: POST
+3. 保存すれば5分おきに実行され、出勤時刻の10分前を過ぎた利用者に、その日の出勤者リストがpushされます
 
 ## ローカルでの動作確認
 
@@ -123,4 +126,4 @@ curl -X POST "http://localhost:8000/internal/send-reminders?token=<REMINDER_TRIG
 - 表のフォーマットが対応形式と異なる場合は `app/excel_extract.py` の `_find_day_header` / `_find_name_and_block` / `_extract_shifts_for_name` の判定ロジックや、休み記号セット(`_OFF_MARKERS`)、役割の正式名称表(`app/main.py` の `_ROLE_NAMES`)を実際のファイルに合わせて調整する
 - データ永続化を強化したい場合はJSONファイルの代わりにRenderの有料プランでディスクを永続化するか、外部DB(Supabase等)に切り替え可能
 - リマインド時刻を変えたい場合は `.github/workflows/daily-reminder.yml` の cron 式を変更(UTC基準なのでJSTから9時間引いた時刻を指定)
-- 出勤10分前通知のチェック間隔を変えたい場合は `.github/workflows/shift-start-alert.yml` の cron 式(`*/5 * * * *`)を変更
+- 出勤10分前通知のチェック間隔を変えたい場合は cron-job.org 側のジョブ設定(Schedule)を変更
