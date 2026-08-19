@@ -134,3 +134,27 @@ def set_roster(roster: dict) -> None:
 def get_roster() -> dict:
     with _LOCK:
         return _read_json(_ROSTER_PATH)
+
+
+def prune_past_dates() -> None:
+    """全利用者・名簿から、今日より前の日付を削除する。日付が変わるタイミングで
+    専用のcronジョブから呼び出す想定(今日のデータは`>= today`の判定により保持される)。"""
+    with _LOCK:
+        data = _read_all()
+        for record in data.values():
+            merged_shifts, merged_off = _merge_shift_data(
+                record.get("shifts", []), record.get("off_dates", []), [], []
+            )
+            record["shifts"] = merged_shifts
+            record["off_dates"] = merged_off
+        _write_all(data)
+
+        roster = _read_json(_ROSTER_PATH)
+        merged_roster: dict[str, dict] = {}
+        for name, record in roster.items():
+            merged_shifts, merged_off = _merge_shift_data(
+                record.get("shifts", []), record.get("off_dates", []), [], []
+            )
+            if merged_shifts or merged_off:
+                merged_roster[name] = {"shifts": merged_shifts, "off_dates": merged_off}
+        _write_json(_ROSTER_PATH, merged_roster)

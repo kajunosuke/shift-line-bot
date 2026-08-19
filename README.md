@@ -105,6 +105,11 @@ git commit -m "Initial commit: shift reminder LINE bot"
    - 保存後、ジョブ詳細画面のURLに含まれる数字が Job ID。これを `CRONJOB_ALERT_JOB_ID` としてRenderに設定
 4. APIキーを発行: cron-job.orgの「Settings」→「API」タブ →「Create API Key」。これを `CRONJOB_API_KEY` としてRenderに設定
 5. (任意)Renderのスリープ防止用に、`https://<Renderのドメイン>/health` を10分おきに叩くジョブも作成しておくと安定します(トークン不要)
+6. 過去データ削除用ジョブを作成:
+   - URL: `https://<Renderのドメイン>/internal/prune-past-dates?token=<REMINDER_TRIGGER_TOKENの値>`
+   - Schedule: 毎日00:05(JST。日付が変わった直後)
+   - Request method: POST
+   - 今日より前の日付のシフト・休みデータを削除する(今日分は`>= 今日`の判定で保持されるので、日中に消えることはない)
 
 GitHub Actionsの `daily-reminder.yml` はバックアップ用に残していますが、自動実行(schedule)は無効化しているので、普段は使いません。何かの理由でcron-job.orgを使わず手動できっかけを作りたい場合のみ、Actionsタブの「Run workflow」から実行できます。
 

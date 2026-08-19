@@ -466,6 +466,16 @@ async def send_shift_start_alerts(request: Request):
     return {"date_checked": today, "alerts_sent": len(sent)}
 
 
+@app.post("/internal/prune-past-dates")
+async def prune_past_dates(request: Request):
+    token = request.query_params.get("token")
+    if token != REMINDER_TRIGGER_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    storage.prune_past_dates()
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
