@@ -36,10 +36,10 @@
 - `app/main.py` … FastAPI本体。LINE Webhook受信、名前登録、Excel解析結果の登録、リマインド送信エンドポイント
 - `app/excel_extract.py` … openpyxlでExcelのセル構造を解析し、該当者の出勤日をルールベースで抽出
 - `app/storage.py` … 利用者ごとの名前・出勤日をJSONファイル(`data/users.json`)に保存する簡易ストレージ
-- `.github/workflows/daily-reminder.yml` … 毎日13:00 JSTに `/internal/send-reminders` を叩くGitHub Actions
+- `.github/workflows/daily-reminder.yml` … `/internal/send-reminders` を叩くGitHub Actions。自動実行(schedule)は無効化済みで、手動実行(workflow_dispatch)のみ残している
 - `render.yaml` … Renderへのデプロイ設定
 
-`/internal/send-shift-start-alerts`(出勤10分前通知用)は5分おきの実行が必要ですが、GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、こちらは**cron-job.org**(外部の無料cronサービス)から5分おきにPOSTする運用にしています。GitHub Actions側にはこのジョブは含めていません。
+`/internal/send-reminders`(日次13:00リマインド)と `/internal/send-shift-start-alerts`(出勤10分前通知)はどちらも、**GitHub Actionsのscheduleではなくcron-job.org**(外部の無料cronサービス)から直接POSTする運用にしています。GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、時刻精度が必要なこの2つはcron-job.orgに統一しています。
 
 ## セットアップ手順
 
@@ -86,23 +86,19 @@ git commit -m "Initial commit: shift reminder LINE bot"
 
 「Messaging API設定」タブの Webhook URL に `https://<Renderのドメイン>/webhook` を設定し、「検証」で成功することを確認。
 
-### 5. GitHub Actionsで日次リマインドをスケジュール
-
-リポジトリの Settings → Secrets and variables → Actions で以下を登録:
-
-- `REMINDER_ENDPOINT_URL` = `https://<Renderのドメイン>/internal/send-reminders`
-- `REMINDER_TRIGGER_TOKEN` = Renderに設定したものと同じ値
-
-`.github/workflows/daily-reminder.yml` が毎日04:00 UTC(=13:00 JST)に自動実行され、翌日が出勤日/休みの利用者に通知をpushします。手動実行は Actions タブの「Run workflow」から可能です。
-
-### 6. cron-job.orgで出勤10分前通知をスケジュール
+### 5. cron-job.orgでリマインド送信をスケジュール
 
 1. https://cron-job.org/ で無料アカウントを作成
-2. 「CREATE CRONJOB」で新しいジョブを作成:
+2. 日次リマインド用ジョブを作成:
+   - URL: `https://<Renderのドメイン>/internal/send-reminders?token=<REMINDER_TRIGGER_TOKENの値>`
+   - Schedule: 毎日13:00(JSTタイムゾーンを指定するか、UTC 04:00で設定)
+   - Request method: POST
+3. 出勤10分前通知用ジョブを作成:
    - URL: `https://<Renderのドメイン>/internal/send-shift-start-alerts?token=<REMINDER_TRIGGER_TOKENの値>`
    - Schedule: Every 5 minutes
    - Request method: POST
-3. 保存すれば5分おきに実行され、出勤時刻の10分前を過ぎた利用者に、その日の出勤者リストがpushされます
+
+GitHub Actionsの `daily-reminder.yml` はバックアップ用に残していますが、自動実行(schedule)は無効化しているので、普段は使いません。何かの理由でcron-job.orgを使わず手動できっかけを作りたい場合のみ、Actionsタブの「Run workflow」から実行できます。
 
 ## ローカルでの動作確認
 

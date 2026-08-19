@@ -1,9 +1,7 @@
 name: Daily shift reminder
 
 on:
-  schedule:
-    # TEMPORARY テスト用: 5分おき(元は "0 4 * * *" = 13:00 JST)。テスト完了後に元へ戻すこと。
-    - cron: "*/5 * * * *"
+  # 自動実行(schedule)はcron-job.orgに移行したため無効化。手動実行(workflow_dispatch)のみ残す。
   workflow_dispatch: {}
 
 jobs:
