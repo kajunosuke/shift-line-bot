@@ -12,3 +12,7 @@ services:
         sync: false
       - key: REMINDER_TRIGGER_TOKEN
         sync: false
+      - key: CRONJOB_API_KEY
+        sync: false
+      - key: CRONJOB_ALERT_JOB_ID
+        sync: false

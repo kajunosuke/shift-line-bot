@@ -3,7 +3,7 @@
 シフト表のExcelファイル(.xlsx)をLINEで送ると、自分の出勤日を抽出して登録するBotです。AIは使わず、Excelのセル構造をルールベースで解析します。
 
 - 各出勤日の**前日13:00(JST)**にリマインド(出勤日なら時刻・役割つき、休みの日は「休みです」)
-- 自分の出勤時刻の**10分前**に、その日の出勤者リストをプッシュ通知
+- 自分の出勤時刻の**10分前**に、その日の出勤者リストをプッシュ通知(cron-job.orgのAPIでジョブのスケジュールをその都度書き換えることで、ポーリングなしでピンポイントの時刻に実行)
 - 「今日/明日出勤リスト」「今日/明日の自分は出勤?」のQuick Replyボタンでいつでも確認可能
 - Excelファイルを送ると、LINE未登録の人も含めて**ファイル内の全従業員分**のシフトを名簿として保存するので、出勤リストには全員分が表示される(個人へのリマインドはLINEで名前登録した本人にのみ届く)
 
@@ -36,10 +36,13 @@
 - `app/main.py` … FastAPI本体。LINE Webhook受信、名前登録、Excel解析結果の登録、リマインド送信エンドポイント
 - `app/excel_extract.py` … openpyxlでExcelのセル構造を解析し、該当者の出勤日をルールベースで抽出
 - `app/storage.py` … 利用者ごとの名前・出勤日をJSONファイル(`data/users.json`)に保存する簡易ストレージ
+- `app/cronjob_client.py` … cron-job.orgのAPIを呼び、出勤アラート用ジョブのスケジュールを動的に書き換える
 - `.github/workflows/daily-reminder.yml` … `/internal/send-reminders` を叩くGitHub Actions。自動実行(schedule)は無効化済みで、手動実行(workflow_dispatch)のみ残している
 - `render.yaml` … Renderへのデプロイ設定
 
-`/internal/send-reminders`(日次13:00リマインド)と `/internal/send-shift-start-alerts`(出勤10分前通知)はどちらも、**GitHub Actionsのscheduleではなくcron-job.org**(外部の無料cronサービス)から直接POSTする運用にしています。GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、時刻精度が必要なこの2つはcron-job.orgに統一しています。
+`/internal/send-reminders`(日次13:00リマインド)は、**GitHub Actionsのscheduleではなくcron-job.org**(外部の無料cronサービス)から直接POSTする運用にしています。GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、時刻精度が必要な部分はcron-job.orgに統一しています。
+
+`/internal/send-shift-start-alerts`(出勤10分前通知)は、数分おきのポーリングではなく、**cron-job.orgのAPI経由でジョブのスケジュールをその都度「次に必要な1回」に書き換える**方式にしています。Excelファイルを受け取った直後と、毎日13:00のリマインド送信時に、翌日の出勤者の中で最も早い出勤時刻を調べ、その10分前ちょうどに1回だけ実行されるようジョブを更新します(`app/main.py` の `_schedule_next_shift_alert_for_date`)。
 
 ## セットアップ手順
 
@@ -77,7 +80,9 @@ git commit -m "Initial commit: shift reminder LINE bot"
 3. 環境変数を設定:
    - `LINE_CHANNEL_ACCESS_TOKEN`
    - `LINE_CHANNEL_SECRET`
-   - `REMINDER_TRIGGER_TOKEN`(任意のランダム文字列。GitHub Actions側と一致させる)
+   - `REMINDER_TRIGGER_TOKEN`(任意のランダム文字列)
+   - `CRONJOB_API_KEY`(cron-job.orgのAPIキー。手順5参照)
+   - `CRONJOB_ALERT_JOB_ID`(出勤アラート用ジョブのID。手順5参照)
 4. デプロイ完了後に発行されるURL(例: `https://shift-line-bot.onrender.com`)を控える
 
 **注意(無料プランの制限)**: Renderの無料Web Serviceは一定時間アクセスがないとスリープします。スリープ中にLINEからWebhookが来ると応答が遅れる/失敗することがあります。安定運用したい場合は有料プラン(最小構成で月$7程度)への切り替えを推奨します。またRenderの無料プランはディスクが永続化されないため、再デプロイのたびに `data/users.json` の登録内容が消える点にも注意してください(継続利用するなら後述の「発展」を検討)。
@@ -93,10 +98,12 @@ git commit -m "Initial commit: shift reminder LINE bot"
    - URL: `https://<Renderのドメイン>/internal/send-reminders?token=<REMINDER_TRIGGER_TOKENの値>`
    - Schedule: 毎日13:00(JSTタイムゾーンを指定するか、UTC 04:00で設定)
    - Request method: POST
-3. 出勤10分前通知用ジョブを作成:
+3. 出勤アラート用ジョブを作成(スケジュールは仮でよい。Botが毎回書き換えます):
    - URL: `https://<Renderのドメイン>/internal/send-shift-start-alerts?token=<REMINDER_TRIGGER_TOKENの値>`
-   - Schedule: Every 5 minutes
    - Request method: POST
+   - 保存後、ジョブ詳細画面のURLに含まれる数字が Job ID。これを `CRONJOB_ALERT_JOB_ID` としてRenderに設定
+4. APIキーを発行: cron-job.orgの「Settings」→「API」タブ →「Create API Key」。これを `CRONJOB_API_KEY` としてRenderに設定
+5. (任意)Renderのスリープ防止用に、`https://<Renderのドメイン>/health` を10分おきに叩くジョブも作成しておくと安定します(トークン不要)
 
 GitHub Actionsの `daily-reminder.yml` はバックアップ用に残していますが、自動実行(schedule)は無効化しているので、普段は使いません。何かの理由でcron-job.orgを使わず手動できっかけを作りたい場合のみ、Actionsタブの「Run workflow」から実行できます。
 

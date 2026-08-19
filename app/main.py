@@ -28,6 +28,7 @@ from linebot.v3.webhooks import (
 )
 
 from app import storage
+from app.cronjob_client import schedule_next_shift_alert
 from app.excel_extract import extract_all_shifts_from_excel, extract_shift_dates_from_excel
 
 logging.basicConfig(level=logging.INFO)
@@ -197,6 +198,32 @@ def _time_str_to_minutes(time_str: str | None) -> int | None:
         return None
 
 
+def _schedule_next_shift_alert_for_date(target_date: str) -> None:
+    """指定した日付(YYYY-MM-DD)の登録者の中で最も早い出勤時刻を探し、
+    その10分前にcron-job.org経由でsend-shift-start-alertsが1回だけ実行されるよう予約する。
+    登録者が複数いる場合、正確な時刻に合わせられるのは最も早い1人分のみ。"""
+    earliest_minutes = None
+    for record in storage.all_users().values():
+        match = _find_shift_for_date(record.get("shifts") or [], target_date)
+        if not match:
+            continue
+        start_minutes = _time_str_to_minutes(match.get("start"))
+        if start_minutes is None:
+            continue
+        if earliest_minutes is None or start_minutes < earliest_minutes:
+            earliest_minutes = start_minutes
+
+    if earliest_minutes is None:
+        return
+
+    target_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+    day_offset, minute_of_day = divmod(earliest_minutes - 10, 24 * 60)
+    alarm_day = target_day + timedelta(days=day_offset)
+    hour, minute = divmod(minute_of_day, 60)
+    alarm_dt = datetime(alarm_day.year, alarm_day.month, alarm_day.day, hour, minute, tzinfo=_JST)
+    schedule_next_shift_alert(alarm_dt)
+
+
 def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
     shifts = result.get("shifts") or []
     off_dates = result.get("off_dates") or []
@@ -352,6 +379,12 @@ def handle_file(event: MessageEvent) -> None:
 
     _apply_extraction_result(event, name, user_id, result)
 
+    try:
+        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+        _schedule_next_shift_alert_for_date(tomorrow)
+    except Exception:
+        logger.exception("failed to schedule next shift alert")
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -383,6 +416,11 @@ async def send_reminders(request: Request):
         elif tomorrow in (record.get("off_dates") or []):
             _push(user_id, f"【リマインド】明日 {tomorrow_label} は休みです。{name}さん ゆっくり休んでください。")
             sent.append(user_id)
+
+    try:
+        _schedule_next_shift_alert_for_date(tomorrow)
+    except Exception:
+        logger.exception("failed to schedule next shift alert")
 
     return {"date_checked": tomorrow, "reminders_sent": len(sent)}
 
