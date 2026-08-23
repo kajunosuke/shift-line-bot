@@ -2,5 +2,3 @@
 __pycache__/
 *.pyc
 .venv/
-data/users.json
-data/roster.json

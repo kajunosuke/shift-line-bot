@@ -36,7 +36,7 @@
 
 - `app/main.py` … FastAPI本体。LINE Webhook受信、名前登録、Excel解析結果の登録、リマインド送信エンドポイント
 - `app/excel_extract.py` … openpyxlでExcelのセル構造を解析し、該当者の出勤日をルールベースで抽出
-- `app/storage.py` … 利用者ごとの名前・出勤日をJSONファイル(`data/users.json`)に保存する簡易ストレージ
+- `app/storage.py` … 利用者ごとの名前・出勤日をUpstash Redis(REST API経由)に保存するストレージ
 - `app/cronjob_client.py` … cron-job.orgのAPIを呼び、出勤アラート用ジョブのスケジュールを動的に書き換える
 - `.github/workflows/daily-reminder.yml` … `/internal/send-reminders` を叩くGitHub Actions。自動実行(schedule)は無効化済みで、手動実行(workflow_dispatch)のみ残している
 - `render.yaml` … Renderへのデプロイ設定
@@ -82,17 +82,29 @@ git commit -m "Initial commit: shift reminder LINE bot"
    - `LINE_CHANNEL_ACCESS_TOKEN`
    - `LINE_CHANNEL_SECRET`
    - `REMINDER_TRIGGER_TOKEN`(任意のランダム文字列)
-   - `CRONJOB_API_KEY`(cron-job.orgのAPIキー。手順5参照)
-   - `CRONJOB_ALERT_JOB_ID`(出勤アラート用ジョブのID。手順5参照)
+   - `CRONJOB_API_KEY`(cron-job.orgのAPIキー。手順6参照)
+   - `CRONJOB_ALERT_JOB_ID`(出勤アラート用ジョブのID。手順6参照)
+   - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`(データ保存用。手順5参照)
 4. デプロイ完了後に発行されるURL(例: `https://shift-line-bot.onrender.com`)を控える
 
-**注意(無料プランの制限)**: Renderの無料Web Serviceは一定時間アクセスがないとスリープします。スリープ中にLINEからWebhookが来ると応答が遅れる/失敗することがあります。安定運用したい場合は有料プラン(最小構成で月$7程度)への切り替えを推奨します。またRenderの無料プランはディスクが永続化されないため、再デプロイのたびに `data/users.json` の登録内容が消える点にも注意してください(継続利用するなら後述の「発展」を検討)。
+**注意(無料プランの制限)**: Renderの無料Web Serviceは一定時間アクセスがないとスリープします。スリープ中にLINEからWebhookが来ると応答が遅れる/失敗することがあります。安定運用したい場合は有料プラン(最小構成で月$7程度)への切り替えを推奨します。データ自体はUpstash Redis(手順5)に保存しているので、Renderを再デプロイしてもデータは消えません。
 
 ### 4. LINE DevelopersにWebhook URLを設定
 
 「Messaging API設定」タブの Webhook URL に `https://<Renderのドメイン>/webhook` を設定し、「検証」で成功することを確認。
 
-### 5. cron-job.orgでリマインド送信をスケジュール
+### 5. Upstash Redisを作成(データ保存用)
+
+1. https://upstash.com/ にアクセスし、無料アカウントを作成(クレジットカード不要)
+2. 「Create Database」で新しいRedisデータベースを作成(リージョンは任意)
+3. データベースの詳細画面にある「REST API」セクションから以下を控える:
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+4. この2つをRenderの環境変数に設定
+
+これで、Renderを再デプロイしてもシフトデータが消えなくなります。
+
+### 6. cron-job.orgでリマインド送信をスケジュール
 
 1. https://cron-job.org/ で無料アカウントを作成
 2. 日次リマインド用ジョブを作成:
@@ -133,6 +145,6 @@ curl -X POST "http://localhost:8000/internal/send-reminders?token=<REMINDER_TRIG
 
 - 複数名分のシフトが1枚の表にある場合でも、登録名でセルを判別する方式なので同じ表を複数人が送っても個別に自分の分だけ登録される
 - 表のフォーマットが対応形式と異なる場合は `app/excel_extract.py` の `_find_day_header` / `_find_name_and_block` / `_extract_shifts_for_name` の判定ロジックや、休み記号セット(`_OFF_MARKERS`)、役割の正式名称表(`app/main.py` の `_ROLE_NAMES`)を実際のファイルに合わせて調整する
-- データ永続化を強化したい場合はJSONファイルの代わりにRenderの有料プランでディスクを永続化するか、外部DB(Supabase等)に切り替え可能
+- データはUpstash Redis(無料枠: 256MB、月50万コマンド)に保存。上限に近づいた場合は他の無料DB(Supabase等)への切り替えや有料プランへのアップグレードを検討
 - リマインド時刻を変えたい場合は `.github/workflows/daily-reminder.yml` の cron 式を変更(UTC基準なのでJSTから9時間引いた時刻を指定)
 - 出勤10分前通知のチェック間隔を変えたい場合は cron-job.org 側のジョブ設定(Schedule)を変更

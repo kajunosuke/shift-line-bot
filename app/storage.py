@@ -5,38 +5,46 @@ import threading
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import httpx
+
 _LOCK = threading.Lock()
-_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-_DATA_PATH = os.path.join(_DATA_DIR, "users.json")
-_ROSTER_PATH = os.path.join(_DATA_DIR, "roster.json")
 _JST = ZoneInfo("Asia/Tokyo")
 
-
-def _ensure_file(path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({}, f)
+_REDIS_URL = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
+_REDIS_TOKEN = os.environ["UPSTASH_REDIS_REST_TOKEN"]
+_USERS_KEY = "shift_bot:users"
+_ROSTER_KEY = "shift_bot:roster"
 
 
-def _read_json(path: str) -> dict:
-    _ensure_file(path)
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def _read_json(key: str) -> dict:
+    response = httpx.get(
+        f"{_REDIS_URL}/get/{key}",
+        headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    result = response.json().get("result")
+    if not result:
+        return {}
+    return json.loads(result)
 
 
-def _write_json(path: str, data: dict) -> None:
-    _ensure_file(path)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def _write_json(key: str, data: dict) -> None:
+    response = httpx.post(
+        f"{_REDIS_URL}/set/{key}",
+        headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+        content=json.dumps(data, ensure_ascii=False),
+        timeout=10,
+    )
+    response.raise_for_status()
 
 
 def _read_all() -> dict:
-    return _read_json(_DATA_PATH)
+    return _read_json(_USERS_KEY)
 
 
 def _write_all(data: dict) -> None:
-    _write_json(_DATA_PATH, data)
+    _write_json(_USERS_KEY, data)
 
 
 def _today_str() -> str:
@@ -114,7 +122,7 @@ def set_roster(roster: dict) -> None:
     (今日より前の日付は自動的に取り除く)。並び順は、既存の並びをそのまま維持し、
     新しく現れた人だけを(表に出てきた順で)末尾に追加する。"""
     with _LOCK:
-        existing = _read_json(_ROSTER_PATH)
+        existing = _read_json(_ROSTER_KEY)
         merged: dict[str, dict] = {}
 
         ordered_names = list(existing.keys())
@@ -134,18 +142,18 @@ def set_roster(roster: dict) -> None:
             if merged_shifts or merged_off:
                 merged[name] = {"shifts": merged_shifts, "off_dates": merged_off}
 
-        _write_json(_ROSTER_PATH, merged)
+        _write_json(_ROSTER_KEY, merged)
 
 
 def get_roster() -> dict:
     with _LOCK:
-        return _read_json(_ROSTER_PATH)
+        return _read_json(_ROSTER_KEY)
 
 
 def update_roster_entry(name: str, shifts: list[dict], off_dates: list[str]) -> None:
     """名簿のうち1人分だけをマージ更新する(シフト変更コマンド用)。"""
     with _LOCK:
-        roster = _read_json(_ROSTER_PATH)
+        roster = _read_json(_ROSTER_KEY)
         old_record = roster.get(name, {})
         merged_shifts, merged_off = _merge_shift_data(
             old_record.get("shifts", []), old_record.get("off_dates", []), shifts, off_dates
@@ -154,7 +162,7 @@ def update_roster_entry(name: str, shifts: list[dict], off_dates: list[str]) -> 
             roster[name] = {"shifts": merged_shifts, "off_dates": merged_off}
         elif name in roster:
             del roster[name]
-        _write_json(_ROSTER_PATH, roster)
+        _write_json(_ROSTER_KEY, roster)
 
 
 def set_pending_edit(user_id: str, state: Optional[dict]) -> None:
@@ -187,7 +195,7 @@ def prune_past_dates() -> None:
             record["off_dates"] = merged_off
         _write_all(data)
 
-        roster = _read_json(_ROSTER_PATH)
+        roster = _read_json(_ROSTER_KEY)
         merged_roster: dict[str, dict] = {}
         for name, record in roster.items():
             merged_shifts, merged_off = _merge_shift_data(
@@ -195,4 +203,4 @@ def prune_past_dates() -> None:
             )
             if merged_shifts or merged_off:
                 merged_roster[name] = {"shifts": merged_shifts, "off_dates": merged_off}
-        _write_json(_ROSTER_PATH, merged_roster)
+        _write_json(_ROSTER_KEY, merged_roster)
