@@ -130,6 +130,7 @@ GitHub Actionsの `daily-reminder.yml` はバックアップ用に残してい�
 ```bash
 pip install -r requirements.txt
 cp .env.example .env  # 値を埋める
+export $(grep -v '^#' .env | xargs)  # .envの中身を環境変数として読み込む(このリポジトリはdotenvの自動読み込みをしていないため)
 uvicorn app.main:app --reload
 ```
 
