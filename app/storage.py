@@ -89,7 +89,10 @@ def set_name(user_id: str, name: str) -> None:
         _write_all(data)
 
 
-def set_shifts(user_id: str, shifts: list[dict], off_dates: list[str]) -> None:
+def set_shifts(user_id: str, shifts: list[dict], off_dates: list[str]) -> dict:
+    """指定ユーザーのシフトをマージ保存し、書き込み後の全ユーザーデータを返す。
+    呼び出し側が直後に `get_user` / `all_users` で読み直す(＝同じRedisキーに
+    もう一度アクセスする)手間を省くための戻り値。"""
     with _LOCK:
         data = _read_all()
         record = data.get(user_id, {})
@@ -100,6 +103,7 @@ def set_shifts(user_id: str, shifts: list[dict], off_dates: list[str]) -> None:
         record["off_dates"] = merged_off
         data[user_id] = record
         _write_all(data)
+        return data
 
 
 def mark_shift_start_alert_sent(user_id: str, date_str: str) -> None:

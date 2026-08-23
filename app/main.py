@@ -70,13 +70,17 @@ _ROLE_KEYS_BY_LENGTH = sorted(_ROLE_NAMES, key=len, reverse=True)
 _ROLE_ORDER = ["ス", "洋", "パ", "牛", "飲", "和", "銘", "中", "遅", "研修"]
 
 
+def _match_role_prefix(text: str) -> str | None:
+    return next((k for k in _ROLE_KEYS_BY_LENGTH if text.startswith(k)), None)
+
+
 def _full_role_name(code: str) -> str:
     if code in _ROLE_NAMES:
         return _ROLE_NAMES[code]
     parts = []
     remaining = code
     while remaining:
-        matched_key = next((k for k in _ROLE_KEYS_BY_LENGTH if remaining.startswith(k)), None)
+        matched_key = _match_role_prefix(remaining)
         if matched_key is None:
             return code
         parts.append(_ROLE_NAMES[matched_key])
@@ -91,7 +95,7 @@ def _role_sort_key(role: str | None) -> int:
     組み合わせ記号(例:「ス洋」)は先頭に一致する役割の順位を使う。"""
     if not role:
         return len(_ROLE_ORDER)
-    matched_key = next((k for k in _ROLE_KEYS_BY_LENGTH if role.startswith(k)), None)
+    matched_key = _match_role_prefix(role)
     if matched_key is None or matched_key not in _ROLE_ORDER:
         return len(_ROLE_ORDER)
     return _ROLE_ORDER.index(matched_key)
@@ -103,6 +107,14 @@ _WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 def _format_date_jp(date_str: str) -> str:
     d = datetime.strptime(date_str, "%Y-%m-%d").date()
     return f"{d.month}月{d.day}日({_WEEKDAY_JP[d.weekday()]})"
+
+
+def _today_str() -> str:
+    return datetime.now(_JST).strftime("%Y-%m-%d")
+
+
+def _tomorrow_str() -> str:
+    return (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 _LABEL_TODAY_LIST = "本日の出勤者"
@@ -230,24 +242,20 @@ def _get_message_content(message_id: str) -> bytes:
         return MessagingApiBlob(api_client).get_message_content(message_id)
 
 
-def _format_shift_line(shift: dict) -> str:
-    start = shift.get("start")
-    end = shift.get("end")
-    role = shift.get("role")
-    line = f"・{_format_date_jp(shift['date'])}"
-    if start and end:
-        line += f" {start}〜{end}"
-    if role:
-        line += f"(役割:{role})"
-    return line
-
-
 def _format_shift_time_only(shift: dict) -> str:
     start = shift.get("start")
     end = shift.get("end")
     line = f"・{_format_date_jp(shift['date'])}"
     if start and end:
         line += f" {start}〜{end}"
+    return line
+
+
+def _format_shift_line(shift: dict) -> str:
+    line = _format_shift_time_only(shift)
+    role = shift.get("role")
+    if role:
+        line += f"(役割:{role})"
     return line
 
 
@@ -269,6 +277,16 @@ def _format_shift_details(shift: dict) -> str:
 
 def _find_shift_for_date(shifts: list[dict], date_str: str) -> dict | None:
     return next((s for s in shifts if s.get("date") == date_str), None)
+
+
+def _am_i_working_message(record: dict, date_str: str, day_label: str) -> str:
+    match = _find_shift_for_date(record.get("shifts") or [], date_str)
+    if match:
+        detail = _format_shift_details(match).strip("()")
+        return f"{day_label}は出勤日です\n{detail}" if detail else f"{day_label}は出勤日です"
+    if date_str in (record.get("off_dates") or []):
+        return f"{day_label}は休みです"
+    return f"{day_label}の予定が登録されていません"
 
 
 def _build_worker_list_message(date_str: str, roster: dict) -> str:
@@ -295,12 +313,16 @@ def _time_str_to_minutes(time_str: str | None) -> int | None:
         return None
 
 
-def _schedule_next_shift_alert_for_date(target_date: str) -> None:
+def _schedule_next_shift_alert_for_date(target_date: str, users: dict | None = None) -> None:
     """指定した日付(YYYY-MM-DD)の登録者の中で最も早い出勤時刻を探し、
     その10分前にcron-job.org経由でsend-shift-start-alertsが1回だけ実行されるよう予約する。
-    登録者が複数いる場合、正確な時刻に合わせられるのは最も早い1人分のみ。"""
+    登録者が複数いる場合、正確な時刻に合わせられるのは最も早い1人分のみ。
+    呼び出し側がすでに全ユーザーデータを持っている場合は `users` に渡すことで、
+    Redisへの再読み込みを省略できる。"""
+    if users is None:
+        users = storage.all_users()
     earliest_minutes = None
-    for record in storage.all_users().values():
+    for record in users.values():
         match = _find_shift_for_date(record.get("shifts") or [], target_date)
         if not match:
             continue
@@ -319,6 +341,13 @@ def _schedule_next_shift_alert_for_date(target_date: str) -> None:
     hour, minute = divmod(minute_of_day, 60)
     alarm_dt = datetime(alarm_day.year, alarm_day.month, alarm_day.day, hour, minute, tzinfo=_JST)
     schedule_next_shift_alert(alarm_dt)
+
+
+def _schedule_next_shift_alert_for_date_safe(target_date: str, users: dict | None = None) -> None:
+    try:
+        _schedule_next_shift_alert_for_date(target_date, users)
+    except Exception:
+        logger.exception("failed to schedule next shift alert")
 
 
 def _find_user_id_by_name(name: str) -> str | None:
@@ -363,16 +392,14 @@ def _apply_shift_edit(user_id: str, state: dict, shifts: list[dict], off_dates: 
     name = state["target_name"]
     storage.update_roster_entry(name, shifts, off_dates)
     target_user_id = _find_user_id_by_name(name)
-    if target_user_id:
-        storage.set_shifts(target_user_id, shifts, off_dates)
+    users = storage.set_shifts(target_user_id, shifts, off_dates) if target_user_id else None
 
     storage.set_pending_edit(user_id, None)
 
-    try:
-        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
-        _schedule_next_shift_alert_for_date(tomorrow)
-    except Exception:
-        logger.exception("failed to schedule next shift alert")
+    # target_user_idがLINE未登録(=usersがNone)の場合、登録済みユーザーの出勤時刻は
+    # 何も変わっていないのでスケジュール再計算は不要
+    if users is not None:
+        _schedule_next_shift_alert_for_date_safe(_tomorrow_str(), users)
 
 
 def _proceed_after_day_selected(event, user_id: str, state: dict, date_str: str) -> None:
@@ -492,10 +519,12 @@ def _handle_shift_edit_step(event: MessageEvent, user_id: str, text: str, state:
     _reply(event.reply_token, "エラーが発生しました もう一度「シフト変更」から始めてください")
 
 
-def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> None:
+def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, result: dict) -> dict:
+    """抽出結果を保存し、返信を送る。戻り値は保存後の全ユーザーデータ
+    (呼び出し側がアラートのスケジュール再計算に再利用できるよう、Redisを読み直さず返す)。"""
     shifts = result.get("shifts") or []
     off_dates = result.get("off_dates") or []
-    storage.set_shifts(user_id, shifts, off_dates)
+    users = storage.set_shifts(user_id, shifts, off_dates)
 
     note = result.get("note") or ""
 
@@ -504,13 +533,13 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
         if note:
             message += f"\n{note}"
         _reply(event.reply_token, message)
-        return
+        return users
 
     # 表示は保存後(過去日付を除いた・既存データとマージ済み)のデータを使う
-    stored_shifts = (storage.get_user(user_id) or {}).get("shifts") or []
+    stored_shifts = (users.get(user_id) or {}).get("shifts") or []
     if not stored_shifts:
         _reply(event.reply_token, f"「{name}」さんの出勤日が見つかりませんでした")
-        return
+        return users
 
     lines = "\n".join(_format_shift_line(s) for s in stored_shifts)
     message = f"「{name}」さんの出勤日を登録しました:\n{lines}"
@@ -518,6 +547,7 @@ def _apply_extraction_result(event: MessageEvent, name: str, user_id: str, resul
         message += f"\n\n(補足: {note})"
     message += "\n\n各出勤日の前日 13:00 にリマインドをお送りします"
     _reply(event.reply_token, message)
+    return users
 
 
 @handler.add(FollowEvent)
@@ -546,42 +576,24 @@ def handle_text(event: MessageEvent) -> None:
         return
 
     if text == _LABEL_TODAY_LIST:
-        today = datetime.now(_JST).strftime("%Y-%m-%d")
-        message = _build_worker_list_message(today, storage.get_roster())
+        message = _build_worker_list_message(_today_str(), storage.get_roster())
         _reply(event.reply_token, message)
         return
 
     if text == _LABEL_AM_I_WORKING_TODAY:
-        today = datetime.now(_JST).strftime("%Y-%m-%d")
         record = storage.get_user(user_id) or {}
-        match = _find_shift_for_date(record.get("shifts") or [], today)
-        if match:
-            detail = _format_shift_details(match).strip("()")
-            message = f"今日は出勤日です\n{detail}" if detail else "今日は出勤日です"
-        elif today in (record.get("off_dates") or []):
-            message = "今日は休みです"
-        else:
-            message = "今日の予定が登録されていません"
+        message = _am_i_working_message(record, _today_str(), "今日")
         _reply(event.reply_token, message)
         return
 
     if text == _LABEL_TOMORROW_LIST:
-        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
-        message = _build_worker_list_message(tomorrow, storage.get_roster())
+        message = _build_worker_list_message(_tomorrow_str(), storage.get_roster())
         _reply(event.reply_token, message)
         return
 
     if text == _LABEL_AM_I_WORKING:
-        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
         record = storage.get_user(user_id) or {}
-        match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
-        if match:
-            detail = _format_shift_details(match).strip("()")
-            message = f"明日は出勤日です\n{detail}" if detail else "明日は出勤日です"
-        elif tomorrow in (record.get("off_dates") or []):
-            message = "明日は休みです"
-        else:
-            message = "明日の予定が登録されていません"
+        message = _am_i_working_message(record, _tomorrow_str(), "明日")
         _reply(event.reply_token, message)
         return
 
@@ -713,13 +725,8 @@ def handle_file(event: MessageEvent) -> None:
     except Exception:
         logger.exception("roster extraction failed")
 
-    _apply_extraction_result(event, name, user_id, result)
-
-    try:
-        tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
-        _schedule_next_shift_alert_for_date(tomorrow)
-    except Exception:
-        logger.exception("failed to schedule next shift alert")
+    users = _apply_extraction_result(event, name, user_id, result)
+    _schedule_next_shift_alert_for_date_safe(_tomorrow_str(), users)
 
 
 @app.post("/webhook")
@@ -739,10 +746,11 @@ async def send_reminders(request: Request):
     if token != REMINDER_TRIGGER_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    tomorrow = (datetime.now(_JST) + timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow = _tomorrow_str()
     tomorrow_label = _format_date_jp(tomorrow)
+    users = storage.all_users()
     sent = []
-    for user_id, record in storage.all_users().items():
+    for user_id, record in users.items():
         name = record.get("name", "")
         match = _find_shift_for_date(record.get("shifts") or [], tomorrow)
         if match:
@@ -753,10 +761,7 @@ async def send_reminders(request: Request):
             _push(user_id, f"【リマインド】明日 {tomorrow_label} は休みです {name}さん ゆっくり休んでください")
             sent.append(user_id)
 
-    try:
-        _schedule_next_shift_alert_for_date(tomorrow)
-    except Exception:
-        logger.exception("failed to schedule next shift alert")
+    _schedule_next_shift_alert_for_date_safe(tomorrow, users)
 
     return {"date_checked": tomorrow, "reminders_sent": len(sent)}
 

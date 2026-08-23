@@ -178,16 +178,29 @@ def _find_name_and_block(ws, row_idx: int, first_data_col: int):
     return None
 
 
-def _has_meiten_that_day(ws, col: int, max_row: int) -> bool:
-    """指定した日付の列に「銘」担当の人が(誰か1人でも)いるかどうかを調べる。"""
+def _effective_max_row(ws) -> int:
+    return min(ws.max_row or 0, _MAX_ROWS)
+
+
+def _meiten_columns(ws, date_to_col: dict[dt.date, int], max_row: int) -> set[int]:
+    """「銘」担当が(誰か1人でも)いる日付の列を1シートにつき1回だけ調べる。
+    従業員ごと・日付ごとに毎回列を再スキャンしていた旧実装より大幅に速い。"""
+    remaining = set(date_to_col.values())
+    found: set[int] = set()
     for row_idx in range(1, max_row + 1):
-        value = ws.cell(row=row_idx, column=col).value
-        if isinstance(value, str) and "銘" in value:
-            return True
-    return False
+        if not remaining:
+            break
+        for col in list(remaining):
+            value = ws.cell(row=row_idx, column=col).value
+            if isinstance(value, str) and "銘" in value:
+                found.add(col)
+                remaining.discard(col)
+    return found
 
 
-def _build_entries_for_row(ws, row_idx: int, block_max: int, date_to_col: dict[dt.date, int], max_row: int):
+def _build_entries_for_row(
+    ws, row_idx: int, block_max: int, date_to_col: dict[dt.date, int], meiten_cols: set[int]
+):
     """あるシフト記号行(row_idx)について、日付ごとの出勤エントリと休み確定日を組み立てる。
     出退勤時刻のように数値(時刻シリアル値)しか入らない行は自然に除外される。
     出勤/休みの判定は出退勤時刻の有無を優先する(シフト記号が「○」等でも
@@ -211,7 +224,7 @@ def _build_entries_for_row(ws, row_idx: int, block_max: int, date_to_col: dict[d
         # 出退勤時刻が入っている=出勤日。シフト記号が「○」「◎」等の場合は
         # 夕方出勤スタッフなどで特定の役割を持たないケースなので、役割は「遅」(遅番)扱いにする。
         role = code_text if code_text and code_text not in _OFF_MARKERS else "遅"
-        add_meiten = "洋" in role and not _has_meiten_that_day(ws, col, max_row)
+        add_meiten = "洋" in role and col not in meiten_cols
         entries.append(
             {
                 "date": date_value.isoformat(),
@@ -230,7 +243,7 @@ def _iter_employee_rows(ws, date_to_col: dict[dt.date, int]):
     """シートを走査し、日付列に文字(シフト記号)が並ぶ行を氏名ブロックの手がかりとして
     (氏名, row_idx, block_min, block_max) を1従業員につき1回だけ返す。"""
     first_data_col = min(date_to_col.values())
-    max_row = min(ws.max_row or 0, _MAX_ROWS)
+    max_row = _effective_max_row(ws)
     seen_names: set[str] = set()
 
     for row_idx in range(1, max_row + 1):
@@ -253,11 +266,12 @@ def _iter_employee_rows(ws, date_to_col: dict[dt.date, int]):
 
 
 def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str):
-    max_row = min(ws.max_row or 0, _MAX_ROWS)
+    max_row = _effective_max_row(ws)
+    meiten_cols = _meiten_columns(ws, date_to_col, max_row)
     for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
         if not _names_match(name, user_name):
             continue
-        entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, max_row)
+        entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, meiten_cols)
         return name, entries, off_dates
 
     return None, [], []
@@ -310,10 +324,11 @@ def extract_all_shifts_from_excel(file_bytes: bytes) -> dict[str, dict]:
         if not date_to_col:
             continue
 
-        max_row = min(ws.max_row or 0, _MAX_ROWS)
+        max_row = _effective_max_row(ws)
+        meiten_cols = _meiten_columns(ws, date_to_col, max_row)
         results: dict[str, dict] = {}
         for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
-            entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, max_row)
+            entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, meiten_cols)
             if entries or off_dates:
                 results[name] = {"shifts": entries, "off_dates": off_dates}
 
