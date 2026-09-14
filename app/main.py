@@ -315,7 +315,7 @@ def _time_str_to_minutes(time_str: str | None) -> int | None:
 
 def _schedule_next_shift_alert_for_date(target_date: str, users: dict | None = None) -> None:
     """指定した日付(YYYY-MM-DD)の登録者の中で最も早い出勤時刻を探し、
-    その10分前にcron-job.org経由でsend-shift-start-alertsが1回だけ実行されるよう予約する。
+    その30分前にcron-job.org経由でsend-shift-start-alertsが1回だけ実行されるよう予約する。
     登録者が複数いる場合、正確な時刻に合わせられるのは最も早い1人分のみ。
     呼び出し側がすでに全ユーザーデータを持っている場合は `users` に渡すことで、
     Redisへの再読み込みを省略できる。"""
@@ -336,7 +336,7 @@ def _schedule_next_shift_alert_for_date(target_date: str, users: dict | None = N
         return
 
     target_day = datetime.strptime(target_date, "%Y-%m-%d").date()
-    day_offset, minute_of_day = divmod(earliest_minutes - 10, 24 * 60)
+    day_offset, minute_of_day = divmod(earliest_minutes - 30, 24 * 60)
     alarm_day = target_day + timedelta(days=day_offset)
     hour, minute = divmod(minute_of_day, 60)
     alarm_dt = datetime(alarm_day.year, alarm_day.month, alarm_day.day, hour, minute, tzinfo=_JST)
@@ -789,7 +789,7 @@ async def send_shift_start_alerts(request: Request):
         start_minutes = _time_str_to_minutes(match.get("start"))
         if start_minutes is None:
             continue
-        if now_minutes < start_minutes - 10:
+        if now_minutes < start_minutes - 30:
             continue
 
         if message is None:
