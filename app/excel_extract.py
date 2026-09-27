@@ -265,18 +265,6 @@ def _iter_employee_rows(ws, date_to_col: dict[dt.date, int]):
         yield name, row_idx, block_min, block_max
 
 
-def _extract_shifts_for_name(ws, date_to_col: dict[dt.date, int], user_name: str):
-    max_row = _effective_max_row(ws)
-    meiten_cols = _meiten_columns(ws, date_to_col, max_row)
-    for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
-        if not _names_match(name, user_name):
-            continue
-        entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, meiten_cols)
-        return name, entries, off_dates
-
-    return None, [], []
-
-
 _PREFERRED_SHEET_NAMES = ("配布用",)
 
 
@@ -288,7 +276,12 @@ def _ordered_worksheets(workbook):
     return preferred + rest
 
 
-def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
+def extract_shift_data(file_bytes: bytes, user_name: str) -> tuple[dict, dict[str, dict]]:
+    """ブックを1回だけパースし、指定した利用者の抽出結果と全従業員分の名簿を同時に返す。
+    (個人分の抽出と名簿の抽出でそれぞれ別にブックを開いていた旧実装は、同じファイルを
+    2回パースしていたため無駄が大きかった。両者は本来同じ表から読むべきものなので、
+    ここでまとめて1回のシート走査で両方を組み立てる。)
+    戻り値は (個人の抽出結果, {氏名: {"shifts": [...], "off_dates": [...]}})。"""
     workbook = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     today = datetime.now(_JST).date()
     any_header_found = False
@@ -300,39 +293,35 @@ def extract_shift_dates_from_excel(file_bytes: bytes, user_name: str) -> dict:
             continue
         any_header_found = True
 
-        matched_name, shifts, off_dates = _extract_shifts_for_name(ws, date_to_col, user_name)
-        if matched_name and (shifts or off_dates):
-            return {"shifts": shifts, "off_dates": off_dates, "matched_name_in_table": matched_name, "note": ""}
+        max_row = _effective_max_row(ws)
+        meiten_cols = _meiten_columns(ws, date_to_col, max_row)
+        roster: dict[str, dict] = {}
+        matched_name = None
+        matched_shifts: list[dict] = []
+        matched_off_dates: list[str] = []
+        for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
+            entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, meiten_cols)
+            if not (entries or off_dates):
+                continue
+            roster[name] = {"shifts": entries, "off_dates": off_dates}
+            if matched_name is None and _names_match(name, user_name):
+                matched_name = name
+                matched_shifts = entries
+                matched_off_dates = off_dates
+
+        if roster:
+            note = "" if matched_name else "日付が並んだ表は見つかりましたが、登録名と一致する行が見つかりませんでした。登録名がシフト表内の表記と一致しているか確認してください。"
+            individual = {
+                "shifts": matched_shifts,
+                "off_dates": matched_off_dates,
+                "matched_name_in_table": matched_name,
+                "note": note,
+            }
+            return individual, roster
 
     if any_header_found:
         note = "日付が並んだ表は見つかりましたが、登録名と一致する行が見つかりませんでした。登録名がシフト表内の表記と一致しているか確認してください。"
     else:
         note = "対応している表の形式(日付が横に並んだヘッダー行を含む月間シフト表)が見つかりませんでした。"
-
-    return {"shifts": [], "off_dates": [], "matched_name_in_table": None, "note": note}
-
-
-def extract_all_shifts_from_excel(file_bytes: bytes) -> dict[str, dict]:
-    """ファイル内の全従業員の出勤日・休み確定日を抽出する。
-    戻り値は {氏名: {"shifts": [...], "off_dates": [...]}} の形。"""
-    workbook = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-    today = datetime.now(_JST).date()
-
-    for ws in _ordered_worksheets(workbook):
-        year_month_hint = _find_year_month(ws, today)
-        date_to_col = _find_day_header(ws, year_month_hint)
-        if not date_to_col:
-            continue
-
-        max_row = _effective_max_row(ws)
-        meiten_cols = _meiten_columns(ws, date_to_col, max_row)
-        results: dict[str, dict] = {}
-        for name, row_idx, block_min, block_max in _iter_employee_rows(ws, date_to_col):
-            entries, off_dates = _build_entries_for_row(ws, row_idx, block_max, date_to_col, meiten_cols)
-            if entries or off_dates:
-                results[name] = {"shifts": entries, "off_dates": off_dates}
-
-        if results:
-            return results
-
-    return {}
+    individual = {"shifts": [], "off_dates": [], "matched_name_in_table": None, "note": note}
+    return individual, {}

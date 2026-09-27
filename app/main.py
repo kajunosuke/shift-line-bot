@@ -35,7 +35,7 @@ from linebot.v3.webhooks import (
 
 from app import storage
 from app.cronjob_client import schedule_next_shift_alert
-from app.excel_extract import extract_all_shifts_from_excel, extract_shift_dates_from_excel
+from app.excel_extract import extract_shift_data
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("shiftbot")
@@ -711,7 +711,7 @@ def handle_file(event: MessageEvent) -> None:
 
     file_bytes = _get_message_content(event.message.id)
     try:
-        result = extract_shift_dates_from_excel(file_bytes, name)
+        result, roster = extract_shift_data(file_bytes, name)
     except Exception:
         logger.exception("excel shift extraction failed")
         _reply(event.reply_token, "Excelファイルの解析に失敗しました ファイルが壊れていないか確認して再度送ってください")
@@ -719,11 +719,11 @@ def handle_file(event: MessageEvent) -> None:
 
     logger.info("extraction result for %r: %r", name, result)
 
-    try:
-        roster = extract_all_shifts_from_excel(file_bytes)
-        storage.set_roster(roster)
-    except Exception:
-        logger.exception("roster extraction failed")
+    if roster:
+        try:
+            storage.set_roster(roster)
+        except Exception:
+            logger.exception("roster extraction failed")
 
     users = _apply_extraction_result(event, name, user_id, result)
     _schedule_next_shift_alert_for_date_safe(_tomorrow_str(), users)
