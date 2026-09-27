@@ -38,8 +38,6 @@
 - `app/excel_extract.py` … openpyxlでExcelのセル構造を解析し、該当者の出勤日をルールベースで抽出
 - `app/storage.py` … 利用者ごとの名前・出勤日をUpstash Redis(REST API経由)に保存するストレージ
 - `app/cronjob_client.py` … cron-job.orgのAPIを呼び、出勤アラート用ジョブのスケジュールを動的に書き換える
-- `.github/workflows/daily-reminder.yml` … `/internal/send-reminders` を叩くGitHub Actions。自動実行(schedule)は無効化済みで、手動実行(workflow_dispatch)のみ残している
-
 `/internal/send-reminders`(日次13:00リマインド)は、**GitHub Actionsのscheduleではなくcron-job.org**(外部の無料cronサービス)から直接POSTする運用にしています。GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、時刻精度が必要な部分はcron-job.orgに統一しています。
 
 `/internal/send-shift-start-alerts`(出勤30分前通知)は、数分おきのポーリングではなく、**cron-job.orgのAPI経由でジョブのスケジュールをその都度「次に必要な1回」に書き換える**方式にしています。Excelファイルを受け取った直後と、毎日13:00のリマインド送信時に、翌日の出勤者の中で最も早い出勤時刻を調べ、その30分前ちょうどに1回だけ実行されるようジョブを更新します(`app/main.py` の `_schedule_next_shift_alert_for_date`)。
@@ -195,8 +193,6 @@ git commit -m "Initial commit: shift reminder LINE bot"
 
 VMは常時起動なのでスリープ防止用のkeep-aliveジョブは不要です。
 
-GitHub Actionsの `daily-reminder.yml` はバックアップ用に残していますが、自動実行(schedule)は無効化しているので、普段は使いません。何かの理由でcron-job.orgを使わず手動できっかけを作りたい場合のみ、Actionsタブの「Run workflow」から実行できます。
-
 ## ローカルでの動作確認
 
 ```bash
@@ -217,7 +213,7 @@ curl -X POST "http://localhost:8000/internal/send-reminders?token=<REMINDER_TRIG
 ## 発展(必要であれば)
 
 - 複数名分のシフトが1枚の表にある場合でも、登録名でセルを判別する方式なので同じ表を複数人が送っても個別に自分の分だけ登録される
-- 表のフォーマットが対応形式と異なる場合は `app/excel_extract.py` の `_find_day_header` / `_find_name_and_block` / `_extract_shifts_for_name` の判定ロジックや、休み記号セット(`_OFF_MARKERS`)、役割の正式名称表(`app/main.py` の `_ROLE_NAMES`)を実際のファイルに合わせて調整する
+- 表のフォーマットが対応形式と異なる場合は `app/excel_extract.py` の `_find_day_header` / `_find_name_and_block` / `_build_entries_for_row` の判定ロジックや、休み記号セット(`_OFF_MARKERS`)、役割の正式名称表(`app/main.py` の `_ROLE_NAMES`)を実際のファイルに合わせて調整する
 - データはUpstash Redis(無料枠: 256MB、月50万コマンド)に保存。上限に近づいた場合は他の無料DB(Supabase等)への切り替えや有料プランへのアップグレードを検討
-- リマインド時刻を変えたい場合は `.github/workflows/daily-reminder.yml` の cron 式を変更(UTC基準なのでJSTから9時間引いた時刻を指定)
-- 出勤30分前通知のチェック間隔を変えたい場合は cron-job.org 側のジョブ設定(Schedule)を変更
+- リマインド時刻を変えたい場合は cron-job.org 側の `/internal/send-reminders` ジョブのSchedule を変更
+- 出勤通知を何分前に送るかを変えたい場合は `app/main.py` の `_schedule_next_shift_alert_for_date` と `send_shift_start_alerts` にある「30」を両方変更
