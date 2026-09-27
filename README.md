@@ -39,7 +39,6 @@
 - `app/storage.py` … 利用者ごとの名前・出勤日をUpstash Redis(REST API経由)に保存するストレージ
 - `app/cronjob_client.py` … cron-job.orgのAPIを呼び、出勤アラート用ジョブのスケジュールを動的に書き換える
 - `.github/workflows/daily-reminder.yml` … `/internal/send-reminders` を叩くGitHub Actions。自動実行(schedule)は無効化済みで、手動実行(workflow_dispatch)のみ残している
-- `render.yaml` … Renderへのデプロイ設定
 
 `/internal/send-reminders`(日次13:00リマインド)は、**GitHub Actionsのscheduleではなくcron-job.org**(外部の無料cronサービス)から直接POSTする運用にしています。GitHub Actionsのスケジュール実行は負荷状況によって大幅に遅延することがある(公式に明記されている既知の制約)ため、時刻精度が必要な部分はcron-job.orgに統一しています。
 
@@ -73,25 +72,97 @@ git commit -m "Initial commit: shift reminder LINE bot"
 
 `.env` はコミットしないでください(`.gitignore` 済み)。
 
-### 3. Renderにデプロイ
+### 3. Oracle Cloud Always FreeのVMにデプロイ
 
-1. https://render.com/ にログイン(GitHub連携)
-2. 「New +」→「Blueprint」からこのリポジトリを選択すると `render.yaml` の内容が反映されます
-   (Blueprintを使わない場合は「Web Service」を手動作成し、Build Command: `pip install -r requirements.txt`、Start Command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`)
-3. 環境変数を設定:
-   - `LINE_CHANNEL_ACCESS_TOKEN`
-   - `LINE_CHANNEL_SECRET`
-   - `REMINDER_TRIGGER_TOKEN`(任意のランダム文字列)
-   - `CRONJOB_API_KEY`(cron-job.orgのAPIキー。手順6参照)
-   - `CRONJOB_ALERT_JOB_ID`(出勤アラート用ジョブのID。手順6参照)
-   - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`(データ保存用。手順5参照)
-4. デプロイ完了後に発行されるURL(例: `https://shift-line-bot.onrender.com`)を控える
+無料枠のまま常時起動できる構成(スリープなし)として、Oracle Cloudの Always Free VM を使っています。
 
-**注意(無料プランの制限)**: Renderの無料Web Serviceは一定時間アクセスがないとスリープします。スリープ中にLINEからWebhookが来ると応答が遅れる/失敗することがあります。安定運用したい場合は有料プラン(最小構成で月$7程度)への切り替えを推奨します。データ自体はUpstash Redis(手順5)に保存しているので、Renderを再デプロイしてもデータは消えません。
+1. https://www.oracle.com/cloud/free/ でアカウントを作成(クレジットカード登録が必要ですが、Always Free枠のみ使う限り課金されません)
+2. Oracle Cloud Console → Compute → Instances → Create Instance
+   - Image: Ubuntu 22.04/24.04
+   - Shape: `VM.Standard.A1.Flex`(Always Free対象のArmシェイプ)、OCPU 1・メモリ6GB程度
+   - SSH keys: 「Generate a key pair for me」を選び、**秘密鍵を必ずダウンロードして安全な場所に保管**(削除すると二度とSSH接続できなくなる)
+   - 作成後、インスタンス詳細画面の**Public IPアドレス**を控える
+3. VCNのSecurity List(Networking → Virtual Cloud Networks → 対象VCN → Security Lists)に、Ingress RuleでTCP 80番・443番を `0.0.0.0/0` から許可するルールを追加(22番はデフォルトで開いている)
+4. SSHで接続し、サーバーをセットアップ:
+
+   ```bash
+   ssh -i <秘密鍵のパス> ubuntu@<Public IPアドレス>
+
+   # Python・git・Caddy(自動HTTPS対応のWebサーバー)をインストール
+   sudo apt-get update
+   sudo apt-get install -y python3-venv python3-pip git curl debian-keyring debian-archive-keyring apt-transport-https gnupg
+   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+   sudo apt-get update
+   sudo apt-get install -y caddy
+
+   # アプリを配置
+   sudo mkdir -p /opt/shift-line-bot && sudo chown ubuntu:ubuntu /opt/shift-line-bot
+   git clone <このリポジトリのURL> /opt/shift-line-bot
+   cd /opt/shift-line-bot
+   python3 -m venv venv
+   ./venv/bin/pip install -r requirements.txt
+   ```
+
+5. `/opt/shift-line-bot/.env` に環境変数を設定(`chmod 600` で権限を絞る):
+
+   ```
+   LINE_CHANNEL_ACCESS_TOKEN=...
+   LINE_CHANNEL_SECRET=...
+   REMINDER_TRIGGER_TOKEN=...(任意のランダム文字列)
+   CRONJOB_API_KEY=...(cron-job.orgのAPIキー。手順6参照)
+   CRONJOB_ALERT_JOB_ID=...(出勤アラート用ジョブのID。手順6参照)
+   UPSTASH_REDIS_REST_URL=...(手順5参照)
+   UPSTASH_REDIS_REST_TOKEN=...(手順5参照)
+   ```
+
+6. systemdサービスを作成し、常時起動・自動再起動するようにする(`/etc/systemd/system/shift-line-bot.service`):
+
+   ```ini
+   [Unit]
+   Description=Shift LINE Reminder Bot
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/opt/shift-line-bot
+   EnvironmentFile=/opt/shift-line-bot/.env
+   ExecStart=/opt/shift-line-bot/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+   Restart=always
+   RestartSec=3
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now shift-line-bot
+   ```
+
+7. Caddyでリバースプロキシ + 自動HTTPSを設定(`/etc/caddy/Caddyfile`)。独自ドメインがなければ、Public IPアドレスをそのままドメインにできる無料サービス `<IPアドレスの.を-に置き換えたもの>.sslip.io` が使える(例: `168.110.25.50` →  `168-110-25-50.sslip.io`):
+
+   ```
+   <ドメイン名> {
+       reverse_proxy 127.0.0.1:8000
+   }
+   ```
+
+   ```bash
+   sudo systemctl reload caddy
+   ```
+
+   Let's Encryptが自動的に証明書を取得するので、`https://<ドメイン名>/health` にアクセスして `{"status":"ok"}` が返れば成功。
+
+**運用コマンド**:
+- ログ確認: `sudo journalctl -u shift-line-bot -f`
+- コード更新を反映: `cd /opt/shift-line-bot && git pull && ./venv/bin/pip install -r requirements.txt && sudo systemctl restart shift-line-bot`
+- 再起動してもVMは常時起動なので、Renderの無料プランのようなスリープは発生しない
 
 ### 4. LINE DevelopersにWebhook URLを設定
 
-「Messaging API設定」タブの Webhook URL に `https://<Renderのドメイン>/webhook` を設定し、「検証」で成功することを確認。
+「Messaging API設定」タブの Webhook URL に `https://<手順3で設定したドメイン>/webhook` を設定し、「検証」で成功することを確認。
 
 ### 5. Upstash Redisを作成(データ保存用)
 
@@ -100,28 +171,29 @@ git commit -m "Initial commit: shift reminder LINE bot"
 3. データベースの詳細画面にある「REST API」セクションから以下を控える:
    - `UPSTASH_REDIS_REST_URL`
    - `UPSTASH_REDIS_REST_TOKEN`
-4. この2つをRenderの環境変数に設定
+4. この2つを `/opt/shift-line-bot/.env` に設定
 
-これで、Renderを再デプロイしてもシフトデータが消えなくなります。
+これで、VMを再起動・アプリを再デプロイしてもシフトデータが消えなくなります。
 
 ### 6. cron-job.orgでリマインド送信をスケジュール
 
 1. https://cron-job.org/ で無料アカウントを作成
 2. 日次リマインド用ジョブを作成:
-   - URL: `https://<Renderのドメイン>/internal/send-reminders?token=<REMINDER_TRIGGER_TOKENの値>`
+   - URL: `https://<手順3で設定したドメイン>/internal/send-reminders?token=<REMINDER_TRIGGER_TOKENの値>`
    - Schedule: 毎日13:00(JSTタイムゾーンを指定するか、UTC 04:00で設定)
    - Request method: POST
 3. 出勤アラート用ジョブを作成(スケジュールは仮でよい。Botが毎回書き換えます):
-   - URL: `https://<Renderのドメイン>/internal/send-shift-start-alerts?token=<REMINDER_TRIGGER_TOKENの値>`
+   - URL: `https://<手順3で設定したドメイン>/internal/send-shift-start-alerts?token=<REMINDER_TRIGGER_TOKENの値>`
    - Request method: POST
-   - 保存後、ジョブ詳細画面のURLに含まれる数字が Job ID。これを `CRONJOB_ALERT_JOB_ID` としてRenderに設定
-4. APIキーを発行: cron-job.orgの「Settings」→「API」タブ →「Create API Key」。これを `CRONJOB_API_KEY` としてRenderに設定
-5. (任意)Renderのスリープ防止用に、`https://<Renderのドメイン>/health` を10分おきに叩くジョブも作成しておくと安定します(トークン不要)
-6. 過去データ削除用ジョブを作成:
-   - URL: `https://<Renderのドメイン>/internal/prune-past-dates?token=<REMINDER_TRIGGER_TOKENの値>`
+   - 保存後、ジョブ詳細画面のURLに含まれる数字が Job ID。これを `CRONJOB_ALERT_JOB_ID` として `.env` に設定
+4. APIキーを発行: cron-job.orgの「Settings」→「API」タブ →「Create API Key」。これを `CRONJOB_API_KEY` として `.env` に設定
+5. 過去データ削除用ジョブを作成:
+   - URL: `https://<手順3で設定したドメイン>/internal/prune-past-dates?token=<REMINDER_TRIGGER_TOKENの値>`
    - Schedule: 毎日00:05(JST。日付が変わった直後)
    - Request method: POST
    - 今日より前の日付のシフト・休みデータを削除する(今日分は`>= 今日`の判定で保持されるので、日中に消えることはない)
+
+VMは常時起動なのでスリープ防止用のkeep-aliveジョブは不要です。
 
 GitHub Actionsの `daily-reminder.yml` はバックアップ用に残していますが、自動実行(schedule)は無効化しているので、普段は使いません。何かの理由でcron-job.orgを使わず手動できっかけを作りたい場合のみ、Actionsタブの「Run workflow」から実行できます。
 
