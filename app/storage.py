@@ -10,18 +10,19 @@ import httpx
 _LOCK = threading.Lock()
 _JST = ZoneInfo("Asia/Tokyo")
 
-_REDIS_URL = os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/")
-_REDIS_TOKEN = os.environ["UPSTASH_REDIS_REST_TOKEN"]
 _USERS_KEY = "shift_bot:users"
 _ROSTER_KEY = "shift_bot:roster"
 
+# リクエストごとにTLS接続を張り直さないよう、接続を使い回すクライアントを共有する
+_client = httpx.Client(
+    base_url=os.environ["UPSTASH_REDIS_REST_URL"].rstrip("/"),
+    headers={"Authorization": f"Bearer {os.environ['UPSTASH_REDIS_REST_TOKEN']}"},
+    timeout=10,
+)
+
 
 def _read_json(key: str) -> dict:
-    response = httpx.get(
-        f"{_REDIS_URL}/get/{key}",
-        headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
-        timeout=10,
-    )
+    response = _client.get(f"/get/{key}")
     response.raise_for_status()
     result = response.json().get("result")
     if not result:
@@ -30,12 +31,7 @@ def _read_json(key: str) -> dict:
 
 
 def _write_json(key: str, data: dict) -> None:
-    response = httpx.post(
-        f"{_REDIS_URL}/set/{key}",
-        headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
-        content=json.dumps(data, ensure_ascii=False),
-        timeout=10,
-    )
+    response = _client.post(f"/set/{key}", content=json.dumps(data, ensure_ascii=False))
     response.raise_for_status()
 
 
@@ -106,12 +102,13 @@ def set_shifts(user_id: str, shifts: list[dict], off_dates: list[str]) -> dict:
         return data
 
 
-def mark_shift_start_alert_sent(user_id: str, date_str: str) -> None:
+def mark_shift_start_alerts_sent(user_ids: list[str], date_str: str) -> None:
+    if not user_ids:
+        return
     with _LOCK:
         data = _read_all()
-        record = data.get(user_id, {})
-        record["last_shift_start_alert_date"] = date_str
-        data[user_id] = record
+        for user_id in user_ids:
+            data.setdefault(user_id, {})["last_shift_start_alert_date"] = date_str
         _write_all(data)
 
 

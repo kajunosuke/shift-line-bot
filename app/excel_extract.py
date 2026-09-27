@@ -68,11 +68,15 @@ def _names_match(table_name: str, user_name: str) -> bool:
     return a == b or a in b or b in a
 
 
-def _merge_range_at(ws, row: int, col: int):
+def _merged_range_index(ws, max_col: int) -> dict:
+    """氏名欄(max_col列目まで)の各セル座標→結合範囲の対応表を作る。
+    セルごとに全結合範囲を線形探索するのを避けるため、シートにつき1回だけ作る。"""
+    index = {}
     for merged_range in ws.merged_cells.ranges:
-        if merged_range.min_row <= row <= merged_range.max_row and merged_range.min_col <= col <= merged_range.max_col:
-            return merged_range
-    return None
+        for col in range(merged_range.min_col, min(merged_range.max_col, max_col) + 1):
+            for row in range(merged_range.min_row, merged_range.max_row + 1):
+                index[(row, col)] = merged_range
+    return index
 
 
 def _find_year_month(ws, today: dt.date) -> tuple[int, int]:
@@ -138,7 +142,7 @@ def _find_day_header(ws, year_month_hint: tuple[int, int]) -> dict[dt.date, int]
     return None
 
 
-def _find_name_and_block(ws, row_idx: int, first_data_col: int):
+def _find_name_and_block(ws, row_idx: int, first_data_col: int, merged_index: dict):
     """データ列より左側から氏名を探す。結合セル(複数行にまたがる)のテキストを優先し、
     社員番号のような数値だけのセルは氏名の候補から除外する。
     見つかった場合は (氏名, ブロック開始行, ブロック終了行) を返す。"""
@@ -147,7 +151,7 @@ def _find_name_and_block(ws, row_idx: int, first_data_col: int):
     seen_ranges = set()
 
     for col in range(first_data_col - 1, 0, -1):
-        merged_range = _merge_range_at(ws, row_idx, col)
+        merged_range = merged_index.get((row_idx, col))
         if merged_range is not None:
             key = (merged_range.min_row, merged_range.min_col, merged_range.max_row, merged_range.max_col)
             if key in seen_ranges:
@@ -244,6 +248,7 @@ def _iter_employee_rows(ws, date_to_col: dict[dt.date, int]):
     (氏名, row_idx, block_min, block_max) を1従業員につき1回だけ返す。"""
     first_data_col = min(date_to_col.values())
     max_row = _effective_max_row(ws)
+    merged_index = _merged_range_index(ws, first_data_col - 1)
     seen_names: set[str] = set()
 
     for row_idx in range(1, max_row + 1):
@@ -255,7 +260,7 @@ def _iter_employee_rows(ws, date_to_col: dict[dt.date, int]):
         if string_cells < _MIN_STRING_CELLS:
             continue
 
-        found = _find_name_and_block(ws, row_idx, first_data_col)
+        found = _find_name_and_block(ws, row_idx, first_data_col, merged_index)
         if not found:
             continue
         name, block_min, block_max = found

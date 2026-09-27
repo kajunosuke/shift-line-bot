@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -46,7 +47,10 @@ CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 REMINDER_TRIGGER_TOKEN = os.environ["REMINDER_TRIGGER_TOKEN"]
 
-_config = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
+# 呼び出しごとにApiClientを作ると毎回TLS接続を張り直すため、1つを使い回す
+_api_client = ApiClient(Configuration(access_token=CHANNEL_ACCESS_TOKEN))
+_messaging_api = MessagingApi(_api_client)
+_blob_api = MessagingApiBlob(_api_client)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 app = FastAPI()
@@ -201,13 +205,12 @@ def _reply(
 ) -> None:
     if quick_reply is None and with_quick_reply:
         quick_reply = _default_quick_reply()
-    with ApiClient(_config) as api_client:
-        MessagingApi(api_client).reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[LineTextMessage(text=text, quick_reply=quick_reply)],
-            )
+    _messaging_api.reply_message(
+        ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[LineTextMessage(text=text, quick_reply=quick_reply)],
         )
+    )
 
 
 def _reply_confirm(reply_token: str, question: str) -> None:
@@ -218,28 +221,20 @@ def _reply_confirm(reply_token: str, question: str) -> None:
             MessageAction(label="いいえ", text="いいえ"),
         ],
     )
-    with ApiClient(_config) as api_client:
-        MessagingApi(api_client).reply_message(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TemplateMessage(alt_text=question, template=template, quick_reply=_flow_quick_reply())],
-            )
+    _messaging_api.reply_message(
+        ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TemplateMessage(alt_text=question, template=template, quick_reply=_flow_quick_reply())],
         )
+    )
 
 
 def _push(user_id: str, text: str) -> None:
-    with ApiClient(_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[LineTextMessage(text=text)],
-            )
-        )
+    _messaging_api.push_message(PushMessageRequest(to=user_id, messages=[LineTextMessage(text=text)]))
 
 
 def _get_message_content(message_id: str) -> bytes:
-    with ApiClient(_config) as api_client:
-        return MessagingApiBlob(api_client).get_message_content(message_id)
+    return _blob_api.get_message_content(message_id)
 
 
 def _format_shift_time_only(shift: dict) -> str:
@@ -566,7 +561,8 @@ def handle_text(event: MessageEvent) -> None:
     user_id = event.source.user_id
     text = event.message.text.strip()
 
-    pending_edit = storage.get_pending_edit(user_id)
+    record = storage.get_user(user_id) or {}
+    pending_edit = record.get("pending_edit")
     if pending_edit is not None:
         _handle_shift_edit_step(event, user_id, text, pending_edit)
         return
@@ -581,7 +577,6 @@ def handle_text(event: MessageEvent) -> None:
         return
 
     if text == _LABEL_AM_I_WORKING_TODAY:
-        record = storage.get_user(user_id) or {}
         message = _am_i_working_message(record, _today_str(), "今日")
         _reply(event.reply_token, message)
         return
@@ -592,7 +587,6 @@ def handle_text(event: MessageEvent) -> None:
         return
 
     if text == _LABEL_AM_I_WORKING:
-        record = storage.get_user(user_id) or {}
         message = _am_i_working_message(record, _tomorrow_str(), "明日")
         _reply(event.reply_token, message)
         return
@@ -600,7 +594,6 @@ def handle_text(event: MessageEvent) -> None:
     if text == _LABEL_THIS_MONTH:
         today = datetime.now(_JST)
         month_prefix = today.strftime("%Y-%m")
-        record = storage.get_user(user_id) or {}
         month_shifts = sorted(
             (s for s in (record.get("shifts") or []) if s["date"].startswith(month_prefix)),
             key=lambda s: s["date"],
@@ -616,7 +609,6 @@ def handle_text(event: MessageEvent) -> None:
     if text == _LABEL_THIS_MONTH_OFF:
         today = datetime.now(_JST)
         month_prefix = today.strftime("%Y-%m")
-        record = storage.get_user(user_id) or {}
         month_off_dates = sorted(d for d in (record.get("off_dates") or []) if d.startswith(month_prefix))
         if month_off_dates:
             lines = "\n".join(f"・{_format_date_jp(d)}" for d in month_off_dates)
@@ -635,8 +627,7 @@ def handle_text(event: MessageEvent) -> None:
         _reply(event.reply_token, f"登録名を「{new_name}」に変更しました")
         return
 
-    record = storage.get_user(user_id)
-    if not record or not record.get("name"):
+    if not record.get("name"):
         storage.set_name(user_id, text)
         _reply(
             event.reply_token,
@@ -734,14 +725,15 @@ async def webhook(request: Request):
     signature = request.headers.get("X-Line-Signature", "")
     body = (await request.body()).decode("utf-8")
     try:
-        handler.handle(body, signature)
+        # 中身はRedis/LINE APIへの同期通信やExcel解析なので、イベントループを塞がないようスレッドで実行する
+        await run_in_threadpool(handler.handle, body, signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
     return PlainTextResponse("OK")
 
 
 @app.post("/internal/send-reminders")
-async def send_reminders(request: Request):
+def send_reminders(request: Request):
     token = request.query_params.get("token")
     if token != REMINDER_TRIGGER_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -767,7 +759,7 @@ async def send_reminders(request: Request):
 
 
 @app.post("/internal/send-shift-start-alerts")
-async def send_shift_start_alerts(request: Request):
+def send_shift_start_alerts(request: Request):
     token = request.query_params.get("token")
     if token != REMINDER_TRIGGER_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -780,29 +772,32 @@ async def send_shift_start_alerts(request: Request):
     message = None
     sent = []
 
-    for user_id, record in users.items():
-        if record.get("last_shift_start_alert_date") == today:
-            continue
-        match = _find_shift_for_date(record.get("shifts") or [], today)
-        if not match:
-            continue
-        start_minutes = _time_str_to_minutes(match.get("start"))
-        if start_minutes is None:
-            continue
-        if now_minutes < start_minutes - 30:
-            continue
+    try:
+        for user_id, record in users.items():
+            if record.get("last_shift_start_alert_date") == today:
+                continue
+            match = _find_shift_for_date(record.get("shifts") or [], today)
+            if not match:
+                continue
+            start_minutes = _time_str_to_minutes(match.get("start"))
+            if start_minutes is None:
+                continue
+            if now_minutes < start_minutes - 30:
+                continue
 
-        if message is None:
-            message = _build_worker_list_message(today, storage.get_roster())
-        _push(user_id, f"まもなく出勤時刻です\n{message}")
-        storage.mark_shift_start_alert_sent(user_id, today)
-        sent.append(user_id)
+            if message is None:
+                message = _build_worker_list_message(today, storage.get_roster())
+            _push(user_id, f"まもなく出勤時刻です\n{message}")
+            sent.append(user_id)
+    finally:
+        # 途中で送信に失敗しても、送れた人の分は記録して二重送信を防ぐ
+        storage.mark_shift_start_alerts_sent(sent, today)
 
     return {"date_checked": today, "alerts_sent": len(sent)}
 
 
 @app.post("/internal/prune-past-dates")
-async def prune_past_dates(request: Request):
+def prune_past_dates(request: Request):
     token = request.query_params.get("token")
     if token != REMINDER_TRIGGER_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
